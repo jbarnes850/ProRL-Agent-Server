@@ -1,0 +1,32 @@
+# Merge this into a NeMo GRPO config or pass equivalent Hydra overrides.
+# NeMo consumes this top-level key through MasterConfig(extra="allow").
+polar:
+  rollout_url: http://127.0.0.1:8080
+  task_id_prefix: nemo-polar-qwen3-smoke
+  model_name: Qwen/Qwen3-0.6B
+  max_tokens: 8
+  temperature: 1.0
+  top_p: 1.0
+  session_timeout_seconds: 180
+  task_timeout_seconds: 300
+  poll_interval_seconds: 1
+  request_timeout_seconds: 120
+  trace_selection: last
+  max_policy_staleness: 0
+  require_reward_variance: false
+  runtime:
+    backend: docker
+    image: local/nemo-rl-main-cu132:37526dfa
+    network: host
+    workdir: /polar/session/workspace
+    gpus: 0
+  agent:
+    harness: shell
+  builder:
+    strategy: per_request
+  evaluator:
+    strategy: response_match
+    config:
+      patterns:
+        - "\\b(0|2|4|6|8)\\b"
+      use_regex: true

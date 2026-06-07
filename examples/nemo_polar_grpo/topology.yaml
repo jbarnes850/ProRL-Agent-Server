@@ -1,0 +1,26 @@
+rollout:
+  host: 0.0.0.0
+  port: 8080
+  public_url: http://127.0.0.1:8080
+  save_dir: ./rollout_results
+
+gateway:
+  heartbeat_interval_seconds: 10
+  nodes:
+    - id: nemo-vllm-node
+      host: 0.0.0.0
+      port: 8100
+      public_url: http://127.0.0.1:8100
+      max_init_workers: 4
+      max_run_workers: 8
+      max_postrun_workers: 4
+      model_served: Qwen/Qwen3-0.6B
+      inference:
+        engine: vllm
+        base_url: http://127.0.0.1:30000/v1
+      default_runtime:
+        backend: docker
+        image: local/nemo-rl-main-cu132:37526dfa
+        network: host
+        workdir: /polar/session/workspace
+        gpus: 0
