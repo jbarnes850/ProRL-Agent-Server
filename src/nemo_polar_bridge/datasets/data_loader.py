@@ -13,7 +13,8 @@ from urllib.request import urlopen
 from nemo_polar_bridge.datasets.base import DatasetAdapter, TaskSpec
 
 
-DEFAULT_REASONING_GYM_DATASET_ID = "nvidia/Nemotron-RL-ReasoningGym-v1"
+DEFAULT_NEMO_GYM_DATASET_ID = "nvidia/Nemotron-RL-ReasoningGym-v1"
+DEFAULT_REASONING_GYM_DATASET_ID = DEFAULT_NEMO_GYM_DATASET_ID
 DATASETS_SERVER = "https://datasets-server.huggingface.co"
 
 

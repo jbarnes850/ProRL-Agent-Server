@@ -9,6 +9,7 @@ from nemo_polar_bridge.datasets.prepare_dataset import (
     build_attempt_matrix,
     build_task_template,
 )
+from nemo_polar_bridge.datasets.run_matrix import RunMatrixCell
 
 
 def test_build_attempt_matrix_declares_group_cycle_contract() -> None:
@@ -25,6 +26,29 @@ def test_build_attempt_matrix_declares_group_cycle_contract() -> None:
     assert matrix["schema"] == "nemo_gym_to_polar_attempt_matrix"
     assert matrix["selection_mode"] == "group_cycle"
     assert matrix["attempts"][0]["task_uid"] == "task-1"
+
+
+def test_build_attempt_matrix_carries_run_matrix_metadata() -> None:
+    task = TaskSpec(
+        task_id="task-1",
+        responses_create_params={"input": "2+2?"},
+        prompt="2+2?",
+        answer="4",
+        dataset_id="dataset",
+    )
+    run_matrix = RunMatrixCell(
+        name="baseline:exact-answer-single-turn-chat",
+        dataset_family="nemo_gym",
+        verifier_type="exact_answer",
+        execution_type="single_turn_chat",
+        adapter="nemo_gym_jsonl",
+    )
+
+    matrix = build_attempt_matrix([task.to_attempt()], run_matrix=run_matrix)
+
+    assert matrix["run_matrix"]["name"] == "baseline:exact-answer-single-turn-chat"
+    assert matrix["run_matrix"]["verifier_type"] == "exact_answer"
+    assert matrix["run_matrix"]["execution_type"] == "single_turn_chat"
 
 
 def test_build_task_template_uses_live_verifier_evaluator() -> None:

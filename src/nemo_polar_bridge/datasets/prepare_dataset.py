@@ -11,9 +11,10 @@ from typing import Any
 
 from nemo_polar_bridge.datasets.base import TaskSpec
 from nemo_polar_bridge.datasets.data_loader import (
-    DEFAULT_REASONING_GYM_DATASET_ID,
+    DEFAULT_NEMO_GYM_DATASET_ID,
     NeMoGymDatasetAdapter,
 )
+from nemo_polar_bridge.datasets.run_matrix import RunMatrixCell, build_run_matrix_cell
 from nemo_polar_bridge.datasets.verifiers import portable_verifier_source
 
 
@@ -32,7 +33,11 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def build_task_template(args: argparse.Namespace) -> dict[str, Any]:
+def build_task_template(
+    args: argparse.Namespace,
+    *,
+    run_matrix: RunMatrixCell | None = None,
+) -> dict[str, Any]:
     command = _build_agent_command(args)
     test_command = r"""cd /polar/session/workspace && python3 - <<'PY'
 import json
@@ -100,6 +105,7 @@ PY"""
             "purpose": "NeMo native Async GRPO with Polar live verifier dataset tasks",
             "source_schema": "NeMo Gym JSONL",
             "answer_format": getattr(args, "answer_format", "none"),
+            "run_matrix": {} if run_matrix is None else run_matrix.to_json_dict(),
             "reward_contract": (
                 "One NeMo Gym task row is sampled N times by the current policy; "
                 "each completion is scored by a deterministic verifier against "
@@ -175,11 +181,16 @@ result = verify_completion(content, task)
 PY"""
 
 
-def build_attempt_matrix(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+def build_attempt_matrix(
+    attempts: list[dict[str, Any]],
+    *,
+    run_matrix: RunMatrixCell | None = None,
+) -> dict[str, Any]:
     return {
         "version": 1,
         "schema": "nemo_gym_to_polar_attempt_matrix",
         "selection_mode": "group_cycle",
+        "run_matrix": {} if run_matrix is None else run_matrix.to_json_dict(),
         "attempts": attempts,
         "grouping_contract": (
             "Select one task per GRPO prompt group, then submit the same task once "
@@ -190,7 +201,7 @@ def build_attempt_matrix(attempts: list[dict[str, Any]]) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset-id", default=DEFAULT_REASONING_GYM_DATASET_ID)
+    parser.add_argument("--dataset-id", default=DEFAULT_NEMO_GYM_DATASET_ID)
     parser.add_argument("--config", default="default")
     parser.add_argument("--split", default="train")
     parser.add_argument("--limit", type=int, default=2)
@@ -221,6 +232,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-max-num-seqs", type=int)
     parser.add_argument("--vllm-max-num-batched-tokens", type=int)
     parser.add_argument("--script-path", default="")
+    parser.add_argument("--matrix-name", default="smoke")
+    parser.add_argument("--matrix-cell", default="")
+    parser.add_argument("--dataset-family", default="nemo_gym")
+    parser.add_argument("--verifier-type", default="exact_answer")
+    parser.add_argument("--execution-type", default="single_turn_chat")
+    parser.add_argument("--difficulty-band", default="unspecified")
+    parser.add_argument("--adapter-name", default="nemo_gym_jsonl")
+    parser.add_argument("--matrix-tag", action="append", default=[])
+    parser.add_argument("--matrix-notes", default="")
     return parser.parse_args()
 
 
@@ -302,14 +322,33 @@ def main() -> None:
         adapter.load_tasks(limit=args.limit, scan_rows=args.scan_rows),
         args.answer_format,
     )
+    run_matrix = build_run_matrix_cell(
+        matrix_name=args.matrix_name,
+        matrix_cell=args.matrix_cell,
+        dataset_family=args.dataset_family,
+        verifier_type=args.verifier_type,
+        execution_type=args.execution_type,
+        adapter=args.adapter_name,
+        difficulty_band=args.difficulty_band,
+        source_dataset_filter=args.source_dataset,
+        tags=args.matrix_tag,
+        notes=args.matrix_notes,
+    )
     attempts = [task.to_attempt() for task in tasks]
 
     write_jsonl(output_dir / "data" / "train.jsonl", [task.to_train_row() for task in tasks])
-    write_json(output_dir / "polar" / "attempt_matrix.json", build_attempt_matrix(attempts))
-    write_json(output_dir / "polar" / "task_template.json", build_task_template(args))
+    write_json(
+        output_dir / "polar" / "attempt_matrix.json",
+        build_attempt_matrix(attempts, run_matrix=run_matrix),
+    )
+    write_json(
+        output_dir / "polar" / "task_template.json",
+        build_task_template(args, run_matrix=run_matrix),
+    )
     write_json(
         output_dir / "config.json",
         {
+            "run_matrix": run_matrix.to_json_dict(),
             "dataset": {
                 "id": args.dataset_id,
                 "config": args.config,
@@ -359,6 +398,7 @@ def main() -> None:
         output_dir / "train_data_audit.json",
         {
             **adapter.audit(),
+            "run_matrix": run_matrix.to_json_dict(),
             "reward_contract": (
                 "Live verifier scoring only: dataset answers define ground truth, "
                 "but reward is computed from each sampled completion."
@@ -393,6 +433,7 @@ def main() -> None:
             prepared_dataset={output_dir}
             dataset={args.dataset_id}
             canonical_schema=nemo_gym_jsonl
+            run_matrix={run_matrix.name}
             selected_tasks={[task.stable_id() for task in tasks]}
             selection_mode=group_cycle
             reward_contract=live_verifier
