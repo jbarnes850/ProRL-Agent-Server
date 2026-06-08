@@ -209,6 +209,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-request-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--task-timeout-seconds", type=float, default=240.0)
     parser.add_argument("--test-timeout-seconds", type=float, default=60.0)
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.35)
+    parser.add_argument("--vllm-enforce-eager", default="true")
+    parser.add_argument("--vllm-max-num-seqs", type=int)
+    parser.add_argument("--vllm-max-num-batched-tokens", type=int)
     parser.add_argument("--script-path", default="")
     return parser.parse_args()
 
@@ -250,6 +254,12 @@ def main() -> None:
                 "top_p": args.model_top_p,
                 "top_k": None,
                 "vllm_generation_config": "vllm",
+                "vllm_runtime": {
+                    "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+                    "enforce_eager": args.vllm_enforce_eager,
+                    "max_num_seqs": args.vllm_max_num_seqs,
+                    "max_num_batched_tokens": args.vllm_max_num_batched_tokens,
+                },
             },
             "nemo_rl_ref": args.nemo_rl_ref,
             "polar": {

@@ -31,6 +31,10 @@ POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH="${POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH:-
 POLAR_MODEL_MAX_MODEL_LEN="${POLAR_MODEL_MAX_MODEL_LEN:-8192}"
 POLAR_MODEL_TEMPERATURE="${POLAR_MODEL_TEMPERATURE:-0.6}"
 POLAR_MODEL_TOP_P="${POLAR_MODEL_TOP_P:-0.95}"
+NEMO_VLLM_GPU_MEMORY_UTILIZATION="${NEMO_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
+NEMO_VLLM_ENFORCE_EAGER="${NEMO_VLLM_ENFORCE_EAGER:-true}"
+NEMO_VLLM_MAX_NUM_SEQS="${NEMO_VLLM_MAX_NUM_SEQS:-}"
+NEMO_VLLM_MAX_NUM_BATCHED_TOKENS="${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS:-}"
 NEMO_GRPO_NUM_PROMPTS_PER_STEP="${NEMO_GRPO_NUM_PROMPTS_PER_STEP:-1}"
 NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT="${NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT:-2}"
 NEMO_GRPO_MAX_NUM_STEPS="${NEMO_GRPO_MAX_NUM_STEPS:-1}"
@@ -79,6 +83,16 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
       SOURCE_ARGS+=(--source-dataset "${source_dataset}")
     done
   fi
+  PREPARE_VLLM_ARGS=(
+    --vllm-gpu-memory-utilization "${NEMO_VLLM_GPU_MEMORY_UTILIZATION}"
+    --vllm-enforce-eager "${NEMO_VLLM_ENFORCE_EAGER}"
+  )
+  if [[ -n "${NEMO_VLLM_MAX_NUM_SEQS}" ]]; then
+    PREPARE_VLLM_ARGS+=(--vllm-max-num-seqs "${NEMO_VLLM_MAX_NUM_SEQS}")
+  fi
+  if [[ -n "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}" ]]; then
+    PREPARE_VLLM_ARGS+=(--vllm-max-num-batched-tokens "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}")
+  fi
   PYTHONPATH="${REPO_HOST}/src${PYTHONPATH:+:${PYTHONPATH}}" \
   python3 -m nemo_polar_bridge.datasets.prepare_dataset \
     --dataset-id "${POLAR_DATASET_ID}" \
@@ -104,6 +118,7 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
     --model-top-p "${POLAR_MODEL_TOP_P}" \
     --model-request-timeout-seconds "${POLAR_MODEL_REQUEST_TIMEOUT_SECONDS}" \
     --task-timeout-seconds "${POLAR_TASK_TIMEOUT_SECONDS}" \
+    "${PREPARE_VLLM_ARGS[@]}" \
     --script-path "scripts/smoke/run_nemo_polar_external_collector_spark_smoke.sh"
 else
 cat > "${RUN_DIR}/data/train.jsonl" <<'JSONL'
@@ -357,6 +372,19 @@ if len([node for node in nodes if node.get('Alive')]) < 2:
 ray.shutdown()
 PY" | tee "${RUN_DIR}/logs/ray-resources.log"
 
+VLLM_HYDRA_OVERRIDES=(
+  "policy.generation.vllm_cfg.gpu_memory_utilization=${NEMO_VLLM_GPU_MEMORY_UTILIZATION}"
+  "policy.generation.vllm_cfg.enforce_eager=${NEMO_VLLM_ENFORCE_EAGER}"
+)
+if [[ -n "${NEMO_VLLM_MAX_NUM_SEQS}" ]]; then
+  VLLM_HYDRA_OVERRIDES+=("++policy.generation.vllm_cfg.max_num_seqs=${NEMO_VLLM_MAX_NUM_SEQS}")
+fi
+if [[ -n "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}" ]]; then
+  VLLM_HYDRA_OVERRIDES+=(
+    "++policy.generation.vllm_cfg.max_num_batched_tokens=${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}"
+  )
+fi
+
 echo "running NeMo native Async GRPO with Polar external collector"
 set +e
 docker exec \
@@ -424,8 +452,6 @@ docker exec \
       +policy.generation.vllm_cfg.expose_http_server=true \
       policy.generation.vllm_cfg.enable_vllm_metrics_logger=false \
       policy.generation.vllm_cfg.max_model_len=${POLAR_MODEL_MAX_MODEL_LEN} \
-      policy.generation.vllm_cfg.gpu_memory_utilization=0.35 \
-      policy.generation.vllm_cfg.enforce_eager=true \
       +policy.generation.vllm_kwargs.generation_config=vllm \
       policy.generation.colocated.enabled=false \
       policy.generation.colocated.resources.gpus_per_node=1 \
@@ -448,6 +474,7 @@ docker exec \
       checkpointing.enabled=false \
       cluster.gpus_per_node=1 \
       cluster.num_nodes=2 \
+      ${VLLM_HYDRA_OVERRIDES[*]} \
       ${EXTRA_OVERRIDES[*]}
   " 2>&1 | tee "${RUN_DIR}/logs/grpo-nemo-polar.log"
 code=${PIPESTATUS[0]}
