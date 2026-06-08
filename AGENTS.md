@@ -33,8 +33,24 @@ Do not commit secrets, local logs, generated rollout results, trainer checkpoint
 
 ## NeMo/Polar RL Lab Status
 
-Treat NeMo-only and Polar/ProRL claims separately. The current gate is NeMo native Async GRPO by CLI only. Do not add or restore a custom Polar-NeMo adapter until this one-step two-Spark smoke passes.
+Treat NeMo-only and Polar/ProRL claims separately. The two-Spark NeMo native
+Async GRPO smoke has passed with Qwen3-0.6B using the pinned CUDA 13.2 NeMo main
+image from `scripts/smoke/build_nemo_async_image.sh` and
+`scripts/smoke/run_nemo_async_grpo_spark_smoke.sh`. That validates NeMo native
+async, replay-buffer staleness, importance-sampling correction, non-colocated
+vLLM generation, and train/inference weight sync across the Sparks.
 
-Build the pinned CUDA 13.2 NeMo main image with `scripts/smoke/build_nemo_async_image.sh`. Run `scripts/smoke/run_nemo_async_grpo_spark_smoke.sh` to validate NeMo native async, replay-buffer staleness, importance-sampling correction, non-colocated vLLM generation, and train/inference weight sync across the two Sparks with Qwen3-0.6B, one step, tiny batch, and checkpointing off.
+Polar disaggregation has also passed as an external rollout proof: `spark-f7e2`
+ran Polar rollout/gateway and calculator runtime sessions, while `spark-cfd0`
+served Qwen3-0.6B through vLLM. A grouped calculator task (`num_samples=3`)
+captured prompt tokens, response tokens, rollout logprobs, loss masks, rewards,
+and result files for every session. The grouped Polar result was then validated
+inside the NeMo image against `ReplayBufferImpl.add/sample`,
+`add_grpo_token_loss_masks_and_generation_logprobs`, and
+`batched_message_log_to_flat_message`.
 
-Do not restore the old Polar -> NeMo TransferQueue patch path as the scalable async engine. If the NeMo CLI smoke passes, the next Polar step should be the smallest possible disaggregation proof: run Polar rollout/gateway externally and add only the minimal NeMo collector hook needed to feed NeMo's native `ReplayBuffer` with tokens, rollout logprobs, rewards, `loss_multiplier`, and staleness metadata.
+Do not restore the old Polar -> NeMo TransferQueue patch path as the scalable
+async engine. The remaining unproven gate is live NeMo trainer consumption of
+external Polar groups. The next allowed code is the smallest possible collector
+hook that feeds NeMo's native `ReplayBuffer` with Polar tokens, rollout
+logprobs, rewards, `loss_multiplier`/`sample_mask`, and staleness metadata.
