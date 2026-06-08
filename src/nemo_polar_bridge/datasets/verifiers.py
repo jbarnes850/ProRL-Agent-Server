@@ -60,6 +60,8 @@ def verify_completion(completion: str, task: TaskSpec) -> VerifierResult:
     """
 
     source = (task.source_dataset or "").casefold()
+    if source == "cryptarithm":
+        return _verify_cryptarithm(completion, task)
     if source == "manipulate_matrix":
         return _verify_matrix(completion, task)
     if source == "tower_of_hanoi":
@@ -88,6 +90,22 @@ def _contains_answer(candidate: str, expected: str) -> bool:
     return re.search(rf"(^|[^\w.-]){escaped}($|[^\w.-])", candidate) is not None
 
 
+def _verify_cryptarithm(completion: str, task: TaskSpec) -> VerifierResult:
+    expected = _parse_assignment_map(task.answer)
+    candidate = _parse_assignment_map(extract_candidate_answer(completion))
+    if expected and candidate:
+        passed = candidate == expected
+        return VerifierResult(
+            passed=passed,
+            reward=1.0 if passed else 0.0,
+            reason="cryptarithm_assignment_match" if passed else "cryptarithm_assignment_mismatch",
+            normalized_completion=_format_assignment_map(candidate),
+            normalized_answer=_format_assignment_map(expected),
+            metadata={"verifier": "cryptarithm_assignment"},
+        )
+    return _verify_exact(completion, task)
+
+
 def _verify_matrix(completion: str, task: TaskSpec) -> VerifierResult:
     expected_obj = _coerce_jsonish(task.answer)
     candidate_obj = _coerce_jsonish(extract_candidate_answer(completion))
@@ -100,6 +118,20 @@ def _verify_matrix(completion: str, task: TaskSpec) -> VerifierResult:
             normalized_completion=json.dumps(candidate_obj, sort_keys=True),
             normalized_answer=json.dumps(expected_obj, sort_keys=True),
             metadata={"verifier": "matrix_literal"},
+        )
+    expected_grid = _parse_numeric_grid(task.answer)
+    candidate_grid = _parse_numeric_grid(extract_candidate_answer(completion))
+    if expected_grid and candidate_grid != expected_grid:
+        candidate_grid = _parse_numeric_grid(completion)
+    if expected_grid and candidate_grid:
+        passed = candidate_grid == expected_grid
+        return VerifierResult(
+            passed=passed,
+            reward=1.0 if passed else 0.0,
+            reason="matrix_grid_match" if passed else "matrix_grid_mismatch",
+            normalized_completion=_format_numeric_grid(candidate_grid),
+            normalized_answer=_format_numeric_grid(expected_grid),
+            metadata={"verifier": "matrix_grid"},
         )
     return _verify_exact(completion, task)
 
@@ -121,6 +153,49 @@ def _coerce_jsonish(value: str) -> Any | None:
         except Exception:
             continue
     return None
+
+
+def _parse_assignment_map(value: str) -> dict[str, int]:
+    pairs = re.findall(r"\b([A-Za-z])\s*=\s*(-?\d+)\b", str(value or ""))
+    parsed: dict[str, int] = {}
+    for key, raw_value in pairs:
+        normalized_key = key.upper()
+        if normalized_key in parsed:
+            return {}
+        parsed[normalized_key] = int(raw_value)
+    return parsed
+
+
+def _format_assignment_map(value: dict[str, int]) -> str:
+    return ",".join(f"{key}={value[key]}" for key in sorted(value))
+
+
+def _parse_numeric_grid(value: str) -> list[list[int]]:
+    text = strip_code_fence(str(value or "")).strip()
+    if not text:
+        return []
+    rows: list[list[int]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = line.strip("[]")
+        cells = re.findall(r"-?\d+", line)
+        if not cells:
+            if re.search(r"(?:final answer|answer|therefore|result)\s*:?\s*$", line, re.I):
+                continue
+            return []
+        rows.append([int(cell) for cell in cells])
+    if not rows:
+        return []
+    width = len(rows[0])
+    if width == 0 or any(len(row) != width for row in rows):
+        return []
+    return rows
+
+
+def _format_numeric_grid(value: list[list[int]]) -> str:
+    return "\n".join(" ".join(str(cell) for cell in row) for row in value)
 
 
 def portable_verifier_source() -> str:
@@ -183,6 +258,19 @@ def verify_completion(completion, task):
     source = str(task.get("source_dataset") or "").casefold()
     expected_text = str(task.get("answer") or "")
     candidate_raw = extract_candidate_answer(completion)
+    if source == "cryptarithm":
+        expected_map = parse_assignment_map(expected_text)
+        candidate_map = parse_assignment_map(candidate_raw)
+        if expected_map and candidate_map:
+            passed = candidate_map == expected_map
+            return {
+                "passed": passed,
+                "reward": 1.0 if passed else 0.0,
+                "reason": "cryptarithm_assignment_match" if passed else "cryptarithm_assignment_mismatch",
+                "normalized_completion": format_assignment_map(candidate_map),
+                "normalized_answer": format_assignment_map(expected_map),
+                "metadata": {"verifier": "cryptarithm_assignment"},
+            }
     if source == "manipulate_matrix":
         expected_obj = coerce_jsonish(expected_text)
         candidate_obj = coerce_jsonish(candidate_raw)
@@ -196,6 +284,20 @@ def verify_completion(completion, task):
                 "normalized_answer": json.dumps(expected_obj, sort_keys=True),
                 "metadata": {"verifier": "matrix_literal"},
             }
+        expected_grid = parse_numeric_grid(expected_text)
+        candidate_grid = parse_numeric_grid(candidate_raw)
+        if expected_grid and candidate_grid != expected_grid:
+            candidate_grid = parse_numeric_grid(completion)
+        if expected_grid and candidate_grid:
+            passed = candidate_grid == expected_grid
+            return {
+                "passed": passed,
+                "reward": 1.0 if passed else 0.0,
+                "reason": "matrix_grid_match" if passed else "matrix_grid_mismatch",
+                "normalized_completion": format_numeric_grid(candidate_grid),
+                "normalized_answer": format_numeric_grid(expected_grid),
+                "metadata": {"verifier": "matrix_grid"},
+            }
     candidate = normalize_answer(candidate_raw)
     expected = normalize_answer(expected_text)
     passed = bool(expected) and (candidate == expected or contains_answer(candidate, expected))
@@ -207,4 +309,43 @@ def verify_completion(completion, task):
         "normalized_answer": expected,
         "metadata": {"verifier": "exact_normalized"},
     }
+
+def parse_assignment_map(value):
+    pairs = re.findall(r"\b([A-Za-z])\s*=\s*(-?\d+)\b", str(value or ""))
+    parsed = {}
+    for key, raw_value in pairs:
+        normalized_key = key.upper()
+        if normalized_key in parsed:
+            return {}
+        parsed[normalized_key] = int(raw_value)
+    return parsed
+
+def format_assignment_map(value):
+    return ",".join(f"{key}={value[key]}" for key in sorted(value))
+
+def parse_numeric_grid(value):
+    text = strip_code_fence(str(value or "")).strip()
+    if not text:
+        return []
+    rows = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = line.strip("[]")
+        cells = re.findall(r"-?\d+", line)
+        if not cells:
+            if re.search(r"(?:final answer|answer|therefore|result)\s*:?\s*$", line, re.I):
+                continue
+            return []
+        rows.append([int(cell) for cell in cells])
+    if not rows:
+        return []
+    width = len(rows[0])
+    if width == 0 or any(len(row) != width for row in rows):
+        return []
+    return rows
+
+def format_numeric_grid(value):
+    return "\n".join(" ".join(str(cell) for cell in row) for row in value)
 '''
