@@ -46,10 +46,11 @@ class BaseTransformer(ABC):
         return None
 
     @staticmethod
-    def _is_qwen35_model(model_name: str | None) -> bool:
+    def _is_qwen3_family_model(model_name: str | None) -> bool:
         if not model_name:
             return False
-        return "qwen3.5" in model_name.lower()
+        normalized = model_name.lower()
+        return "qwen3" in normalized or "qwen3.5" in normalized
 
     @staticmethod
     def _content_to_text(content: Any) -> str:
@@ -113,8 +114,9 @@ class BaseTransformer(ABC):
 
         request = self._merge_developer_role(request)
 
-        if self._is_qwen35_model(model_name):
-            # Qwen3.5 outputs tool calls inside thinking; disable thinking.
+        if self._is_qwen3_family_model(model_name):
+            # Qwen3-family chat templates support enable_thinking=False. Keep
+            # rollout/verifier runs in answer mode unless the caller opts in.
             # https://www.reddit.com/r/LocalLLaMA/comments/1sccqt2/i_think_i_got_solutions_for_qwen_35_tool_call_in/
             chat_template_kwargs = dict(request.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", False)

@@ -60,6 +60,19 @@ def test_openai_chat_request_preserves_fields_and_image_content() -> None:
     assert transformed["chat_template_kwargs"] == {"foo": "bar", "enable_thinking": False}
 
 
+def test_openai_chat_disables_thinking_for_qwen3_family() -> None:
+    transformer = OpenAIChatTransformer()
+
+    transformed = transformer.transform_request(
+        {
+            "_polar_model_served": "Qwen/Qwen3-1.7B",
+            "messages": [{"role": "user", "content": "Answer directly."}],
+        }
+    )
+
+    assert transformed["chat_template_kwargs"]["enable_thinking"] is False
+
+
 def test_openai_chat_response_and_stream_preserve_requested_model() -> None:
     transformer = OpenAIChatTransformer()
     upstream = {

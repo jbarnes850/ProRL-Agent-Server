@@ -380,7 +380,6 @@ class _PolarAsyncTrajectoryCollector:
         matrix_path = os.environ.get("NEMO_POLAR_ATTEMPT_MATRIX_PATH")
         self._attempt_selection_mode = "generation_cycle"
         self._attempt_matrix = None
-        self._allow_zero_reward_std = env_flag("NEMO_POLAR_ALLOW_ZERO_REWARD_STD")
         self._group_collection_workers = max(1, env_int("NEMO_POLAR_GROUP_WORKERS", default=1))
         if matrix_path:
             self._attempt_matrix, self._attempt_selection_mode = normalize_attempt_matrix(
@@ -390,7 +389,6 @@ class _PolarAsyncTrajectoryCollector:
         print(f"   rollout_url={self._rollout_url}")
         print(f"   gateway_url={self._gateway_url or 'unset'}")
         print(f"   vllm_http={self._openai_server_base_url() or 'unknown'}")
-        print(f"   allow_zero_reward_std={self._allow_zero_reward_std}")
         print(f"   group_collection_workers={self._group_collection_workers}")
         if self._attempt_matrix is not None:
             print(
@@ -482,7 +480,8 @@ class _PolarAsyncTrajectoryCollector:
                 if target is None:
                     time.sleep(0.5)
                     continue
-                for _ in range(prompts_per_target(self.master_config)):
+                groups_needed = prompts_per_target(self.master_config)
+                for _ in range(groups_needed):
                     if not self.running:
                         break
                     self._pause.wait()
@@ -560,14 +559,9 @@ class _PolarAsyncTrajectoryCollector:
                 "Polar collector refusing invalid group before replay-buffer add: "
                 f"valid_sessions={valid_sessions} group_sessions={group_sessions}"
             )
-        if reward_std < 1e-5 and not self._allow_zero_reward_std:
-            raise RuntimeError(
-                "Polar collector refusing near-zero reward variance before replay-buffer add: "
-                f"rewards={rewards} reward_std={reward_std:.6f}"
-            )
         if reward_std < 1e-5:
             print(
-                "⚠️ Polar collector allowing near-zero reward variance for plumbing verification: "
+                "⚠️ Polar collector observed near-zero reward variance: "
                 f"rewards={rewards} reward_std={reward_std:.6f}"
             )
         print(

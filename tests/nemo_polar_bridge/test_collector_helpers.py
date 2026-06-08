@@ -16,10 +16,10 @@ from nemo_polar_bridge.collector import (
 
 
 def test_env_flag_parses_enabled_values(monkeypatch) -> None:
-    monkeypatch.setenv("NEMO_POLAR_ALLOW_ZERO_REWARD_STD", "true")
-    assert env_flag("NEMO_POLAR_ALLOW_ZERO_REWARD_STD")
-    monkeypatch.setenv("NEMO_POLAR_ALLOW_ZERO_REWARD_STD", "0")
-    assert not env_flag("NEMO_POLAR_ALLOW_ZERO_REWARD_STD")
+    monkeypatch.setenv("NEMO_POLAR_EXAMPLE_FLAG", "true")
+    assert env_flag("NEMO_POLAR_EXAMPLE_FLAG")
+    monkeypatch.setenv("NEMO_POLAR_EXAMPLE_FLAG", "0")
+    assert not env_flag("NEMO_POLAR_EXAMPLE_FLAG")
 
 
 def test_env_int_uses_default_and_env_value(monkeypatch) -> None:

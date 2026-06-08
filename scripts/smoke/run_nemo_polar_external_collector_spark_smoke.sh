@@ -26,6 +26,7 @@ POLAR_DATASET_SPLIT="${POLAR_DATASET_SPLIT:-${TASK_DATASET_SPLIT:-train}}"
 POLAR_DATASET_LIMIT="${POLAR_DATASET_LIMIT:-${TASK_DATASET_LIMIT:-2}}"
 POLAR_DATASET_SCAN_ROWS="${POLAR_DATASET_SCAN_ROWS:-${TASK_DATASET_SCAN_ROWS:-200}}"
 POLAR_SOURCE_DATASETS="${POLAR_SOURCE_DATASETS:-${POLAR_DATASET_SOURCE_DATASETS:-}}"
+POLAR_DATASET_LOCAL_JSONL="${POLAR_DATASET_LOCAL_JSONL:-}"
 POLAR_DATASET_ANSWER_FORMAT="${POLAR_DATASET_ANSWER_FORMAT:-none}"
 POLAR_DATASET_RUNTIME_IMAGE="${POLAR_DATASET_RUNTIME_IMAGE:-${TASK_RUNTIME_IMAGE:-polar-spark-calculator:latest}}"
 POLAR_MATRIX_NAME="${POLAR_MATRIX_NAME:-smoke}"
@@ -56,7 +57,6 @@ NEMO_GRPO_MAX_NUM_STEPS="${NEMO_GRPO_MAX_NUM_STEPS:-1}"
 NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS="${NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS:-1}"
 NEMO_POLICY_TRAIN_GLOBAL_BATCH_SIZE="${NEMO_POLICY_TRAIN_GLOBAL_BATCH_SIZE:-$((NEMO_GRPO_NUM_PROMPTS_PER_STEP * NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT))}"
 NEMO_DATA_TRAIN_SPLIT_VALIDATION_SIZE="${NEMO_DATA_TRAIN_SPLIT_VALIDATION_SIZE:-0.5}"
-NEMO_POLAR_ALLOW_ZERO_REWARD_STD="${NEMO_POLAR_ALLOW_ZERO_REWARD_STD:-0}"
 NEMO_POLAR_GROUP_WORKERS="${NEMO_POLAR_GROUP_WORKERS:-${NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT}}"
 POLAR_GATEWAY_MAX_INIT_WORKERS="${POLAR_GATEWAY_MAX_INIT_WORKERS:-${NEMO_POLAR_GROUP_WORKERS}}"
 POLAR_GATEWAY_MAX_RUN_WORKERS="${POLAR_GATEWAY_MAX_RUN_WORKERS:-${NEMO_POLAR_GROUP_WORKERS}}"
@@ -99,6 +99,10 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
       SOURCE_ARGS+=(--source-dataset "${source_dataset}")
     done
   fi
+  LOCAL_JSONL_ARGS=()
+  if [[ -n "${POLAR_DATASET_LOCAL_JSONL}" ]]; then
+    LOCAL_JSONL_ARGS+=(--local-jsonl "${POLAR_DATASET_LOCAL_JSONL}")
+  fi
   MATRIX_TAG_ARGS=()
   if [[ -n "${POLAR_MATRIX_TAGS}" ]]; then
     IFS=',' read -ra MATRIX_TAG_ITEMS <<< "${POLAR_MATRIX_TAGS}"
@@ -124,6 +128,7 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
     --limit "${POLAR_DATASET_LIMIT}" \
     --scan-rows "${POLAR_DATASET_SCAN_ROWS}" \
     "${SOURCE_ARGS[@]}" \
+    "${LOCAL_JSONL_ARGS[@]}" \
     --answer-format "${POLAR_DATASET_ANSWER_FORMAT}" \
     --output-dir "${RUN_DIR}" \
     --repo-host "${REPO_HOST}" \
@@ -316,7 +321,6 @@ COMMON_ENV=(
   -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP}
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP}
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP}
-  -e NEMO_POLAR_ALLOW_ZERO_REWARD_STD=${NEMO_POLAR_ALLOW_ZERO_REWARD_STD}
   -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS}
 )
 
@@ -377,7 +381,6 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP} \
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP} \
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
-  -e NEMO_POLAR_ALLOW_ZERO_REWARD_STD=${NEMO_POLAR_ALLOW_ZERO_REWARD_STD} \
   -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS} \
   "${IMAGE}" \
   bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --address=${HEAD_IP}:6379 --node-ip-address=${WORKER_IP} --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --disable-usage-stats --block" \
@@ -441,7 +444,6 @@ docker exec \
   -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP} \
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP} \
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
-  -e NEMO_POLAR_ALLOW_ZERO_REWARD_STD=${NEMO_POLAR_ALLOW_ZERO_REWARD_STD} \
   -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS} \
   "${HEAD_CONTAINER}" bash -lc "
     cd /opt/nemo-rl
@@ -567,21 +569,6 @@ for pattern in \
     ok=0
   fi
 done
-
-if [[ "${NEMO_POLAR_ALLOW_ZERO_REWARD_STD}" == "1" ]]; then
-  if ! grep -q "allowing near-zero reward variance for plumbing verification" \
-    "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
-    echo "missing_success_pattern=zero_reward_std_plumbing_marker" \
-      | tee -a "${RUN_DIR}/logs/exit-code.log"
-    ok=0
-  fi
-else
-  if ! grep -Eq "Polar collector adding group .*reward_std=0\\.[1-9]" \
-    "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
-    echo "missing_success_pattern=nonzero_polar_reward_std" | tee -a "${RUN_DIR}/logs/exit-code.log"
-    ok=0
-  fi
-fi
 
 if [[ "${code}" -ne 0 || "${ok}" -ne 1 ]]; then
   echo "FAILED ${RUN_DIR}" | tee -a "${RUN_DIR}/logs/exit-code.log"

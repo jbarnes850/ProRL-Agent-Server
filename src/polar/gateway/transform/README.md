@@ -13,8 +13,8 @@ one backend serves them all.
   Google fully restructure messages, tools, and system prompts.
 - The canonical internal format is **OpenAI Chat Completions**.
 - Shared request normalization lives in `base.py` (`_normalize_request`): merge
-  `developer`→`system` roles, drop internal keys, and for Qwen3.5 models force
-  `enable_thinking=False`. Training-signal params (`logprobs`, token ids) and all
+  `developer`→`system` roles, drop internal keys, and for Qwen3-family models
+  force `enable_thinking=False`. Training-signal params (`logprobs`, token ids) and all
   backend-specific request/response handling live in the gateway's `engine.py`,
   not here.
 - The model swap to the served model happens in the proxy (`server.py`);
@@ -24,7 +24,7 @@ one backend serves them all.
 ## Main files
 
 - `base.py`: the transformer interface + shared training enhancement (role
-  merge, logprobs, Qwen3.5 thinking-off).
+  merge, logprobs, Qwen3-family thinking-off).
 - `openai_chat.py`: near-passthrough (e.g. `max_completion_tokens`→`max_tokens`).
 - `openai_responses.py`: OpenAI Responses ↔ Chat, including reasoning items and
   shell/function tools (used by Codex).
