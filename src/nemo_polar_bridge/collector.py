@@ -514,7 +514,11 @@ class _PolarAsyncTrajectoryCollector:
 try:
     import ray
 
-    PolarAsyncTrajectoryCollector = ray.remote(_PolarAsyncTrajectoryCollector)
+    _remote_options: dict[str, Any] = {}
+    _collector_node_ip = os.environ.get("NEMO_POLAR_COLLECTOR_NODE_IP")
+    if _collector_node_ip:
+        _remote_options["resources"] = {f"node:{_collector_node_ip}": 0.001}
+    PolarAsyncTrajectoryCollector = ray.remote(**_remote_options)(_PolarAsyncTrajectoryCollector)
 except Exception:
     PolarAsyncTrajectoryCollector = _PolarAsyncTrajectoryCollector  # type: ignore[assignment]
 

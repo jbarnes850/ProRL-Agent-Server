@@ -49,8 +49,16 @@ inside the NeMo image against `ReplayBufferImpl.add/sample`,
 `add_grpo_token_loss_masks_and_generation_logprobs`, and
 `batched_message_log_to_flat_message`.
 
+The live NeMo + Polar gate has now passed via
+`scripts/smoke/run_nemo_polar_external_collector_spark_smoke.sh` with run dir
+`/home/jarrodbarnes/nemo-rl-smoke/nemo-polar-qwen3-0p6b-live-20260607-222704`.
+That run pinned NeMo training to `spark-cfd0` (`192.168.100.11`) and NeMo vLLM,
+Polar rollout/gateway, and the Polar collector to `spark-f7e2`
+(`192.168.100.10`). It completed one NeMo native Async GRPO step from two
+Polar calculator attempts with rewards `[1.0, 0.0]`, nonzero group reward std,
+token logprobs, token loss masks, replay-buffer add/sample, GRPO advantages,
+policy training, and weight-sync pause/resume around Polar generation.
+
 Do not restore the old Polar -> NeMo TransferQueue patch path as the scalable
-async engine. The remaining unproven gate is live NeMo trainer consumption of
-external Polar groups. The next allowed code is the smallest possible collector
-hook that feeds NeMo's native `ReplayBuffer` with Polar tokens, rollout
-logprobs, rewards, `loss_multiplier`/`sample_mask`, and staleness metadata.
+async engine. The approved path is NeMo native Async GRPO plus the minimal
+`nemo_polar_bridge` external collector feeding NeMo's native `ReplayBuffer`.

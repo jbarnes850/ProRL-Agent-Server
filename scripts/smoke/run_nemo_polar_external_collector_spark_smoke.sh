@@ -177,6 +177,9 @@ COMMON_ENV=(
   -e NEMO_POLAR_GATEWAY_URL=http://${HEAD_IP}:${POLAR_GATEWAY_PORT}
   -e NEMO_POLAR_TASK_TEMPLATE_PATH=/work/polar/task_template.json
   -e NEMO_POLAR_ATTEMPT_MATRIX_PATH=/work/polar/attempt_matrix.json
+  -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP}
+  -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP}
+  -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP}
 )
 
 COMMON_DOCKER=(
@@ -233,6 +236,9 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NEMO_POLAR_GATEWAY_URL=http://${HEAD_IP}:${POLAR_GATEWAY_PORT} \
   -e NEMO_POLAR_TASK_TEMPLATE_PATH=/work/polar/task_template.json \
   -e NEMO_POLAR_ATTEMPT_MATRIX_PATH=/work/polar/attempt_matrix.json \
+  -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP} \
+  -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP} \
+  -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
   "${IMAGE}" \
   bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --address=${HEAD_IP}:6379 --node-ip-address=${WORKER_IP} --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --disable-usage-stats --block" \
   > "${RUN_DIR}/worker.container.id"
@@ -279,6 +285,9 @@ docker exec \
   -e NEMO_POLAR_GATEWAY_URL=http://${HEAD_IP}:${POLAR_GATEWAY_PORT} \
   -e NEMO_POLAR_TASK_TEMPLATE_PATH=/work/polar/task_template.json \
   -e NEMO_POLAR_ATTEMPT_MATRIX_PATH=/work/polar/attempt_matrix.json \
+  -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP} \
+  -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP} \
+  -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
   "${HEAD_CONTAINER}" bash -lc "
     cd /opt/nemo-rl
     python /work/ProRL-Agent-Server/src/nemo_polar_bridge/run_grpo_with_polar.py \
@@ -370,7 +379,8 @@ for pattern in \
   fi
 done
 
-if ! grep -q "polar/reward_std.*0.5" "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
+if ! grep -Eq "Polar collector adding group .*reward_std=0\\.[1-9]" \
+  "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
   echo "missing_success_pattern=nonzero_polar_reward_std" | tee -a "${RUN_DIR}/logs/exit-code.log"
   ok=0
 fi
