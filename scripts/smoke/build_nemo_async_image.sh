@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build the NeMo RL release image from a pinned upstream revision. This is the
-# happy path for the Polar/TransferQueue smoke: one coherent CUDA/Torch/vLLM/Ray
+# happy path for the native Async GRPO smoke: one coherent CUDA/Torch/vLLM/Ray
 # environment built by NeMo's own Dockerfile, followed by local import/GPU gates.
 
 NEMO_RL_REF="${NEMO_RL_REF:-37526dfac0a80b7032659a3ea030e0a9f69f99c6}"
@@ -44,14 +44,12 @@ import platform
 import torch
 
 required = [
-    "nemo_rl.algorithms.grpo_sync",
-    "nemo_rl.experience.sync_rollout_actor",
-    "nemo_rl.data_plane.adapters.transfer_queue",
+    "nemo_rl.algorithms.grpo",
+    "nemo_rl.algorithms.async_utils.trajectory_collector",
+    "nemo_rl.algorithms.async_utils.replay_buffer",
     "nemo_rl.models.generation.vllm.vllm_worker",
     "nemo_rl.models.generation.vllm.vllm_worker_async",
-    "transfer_queue",
     "tensordict",
-    "vllm",
 ]
 
 print("platform", platform.machine())
@@ -82,17 +80,27 @@ docker run --rm "${IMAGE}" bash -lc 'set -euo pipefail
 for py in \
   /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker/bin/python \
   /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python \
-  /opt/ray_venvs/nemo_rl.experience.sync_rollout_actor.SyncRolloutActor/bin/python \
+  /opt/ray_venvs/nemo_rl.algorithms.async_utils.AsyncTrajectoryCollector/bin/python \
+  /opt/ray_venvs/nemo_rl.algorithms.async_utils.ReplayBuffer/bin/python \
   /opt/ray_venvs/nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2/bin/python; do
   if [ ! -x "$py" ]; then
     echo "missing actor python: $py" >&2
     exit 1
   fi
-  "$py" - <<'"'"'PY'"'"'
+  expect_vllm=0
+  case "$py" in
+    *vllm*|*Vllm*) expect_vllm=1 ;;
+  esac
+  EXPECT_VLLM="$expect_vllm" "$py" - <<'"'"'PY'"'"'
 import importlib
+import os
 import sys
 
-for module in ("torch", "nemo_rl", "tensordict", "transfer_queue"):
+modules = ["torch", "nemo_rl", "tensordict"]
+if os.environ.get("EXPECT_VLLM") == "1":
+    modules.append("vllm")
+
+for module in modules:
     imported = importlib.import_module(module)
     print(sys.executable, module, getattr(imported, "__file__", "built-in"))
 PY

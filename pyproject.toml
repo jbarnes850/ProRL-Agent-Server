@@ -51,7 +51,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["polar*", "slime_bridge*", "nemo_bridge*"]
+include = ["polar*", "slime_bridge*"]
 
 [tool.setuptools.package-data]
 polar = [
