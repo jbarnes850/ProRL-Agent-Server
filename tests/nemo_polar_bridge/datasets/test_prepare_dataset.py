@@ -3,7 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from nemo_polar_bridge.datasets.base import TaskSpec
-from nemo_polar_bridge.datasets.prepare_dataset import build_attempt_matrix, build_task_template
+from nemo_polar_bridge.datasets.prepare_dataset import (
+    FINAL_ANSWER_INSTRUCTION,
+    apply_answer_format,
+    build_attempt_matrix,
+    build_task_template,
+)
 
 
 def test_build_attempt_matrix_declares_group_cycle_contract() -> None:
@@ -32,6 +37,7 @@ def test_build_task_template_uses_live_verifier_evaluator() -> None:
         model_temperature=0.6,
         model_top_p=0.95,
         model_request_timeout_seconds=120.0,
+        answer_format="none",
     )
 
     template = build_task_template(args)
@@ -41,3 +47,42 @@ def test_build_task_template_uses_live_verifier_evaluator() -> None:
     command = template["agent"]["custom_shell"]["command"]
     assert "responses_create_params" in command
     assert "verify_completion" in command
+
+
+def test_apply_final_answer_format_appends_to_last_user_message() -> None:
+    task = TaskSpec(
+        task_id="task-1",
+        responses_create_params={
+            "input": [
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "What is 2+2?"},
+            ]
+        },
+        prompt="What is 2+2?",
+        answer="4",
+        dataset_id="dataset",
+    )
+
+    [formatted] = apply_answer_format([task], "final_answer")
+
+    messages = formatted.responses_create_params["input"]
+    assert messages[0]["content"] == "Be concise."
+    assert messages[1]["content"].endswith(FINAL_ANSWER_INSTRUCTION)
+    assert formatted.prompt.endswith(FINAL_ANSWER_INSTRUCTION)
+    assert formatted.metadata["answer_format"] == "final_answer"
+
+
+def test_apply_final_answer_format_appends_to_string_input_once() -> None:
+    task = TaskSpec(
+        task_id="task-1",
+        responses_create_params={"input": "What is 2+2?"},
+        prompt="What is 2+2?",
+        answer="4",
+        dataset_id="dataset",
+    )
+
+    [formatted] = apply_answer_format([task], "final_answer")
+    [formatted_again] = apply_answer_format([formatted], "final_answer")
+
+    assert formatted.responses_create_params["input"].endswith(FINAL_ANSWER_INSTRUCTION)
+    assert formatted_again.responses_create_params["input"].count(FINAL_ANSWER_INSTRUCTION) == 1

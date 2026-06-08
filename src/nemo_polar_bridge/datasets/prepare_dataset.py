@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 import textwrap
 from typing import Any
 
+from nemo_polar_bridge.datasets.base import TaskSpec
 from nemo_polar_bridge.datasets.data_loader import (
     DEFAULT_REASONING_GYM_DATASET_ID,
     NeMoGymDatasetAdapter,
 )
 from nemo_polar_bridge.datasets.verifiers import portable_verifier_source
+
+
+FINAL_ANSWER_INSTRUCTION = "End your response with a line exactly: Final answer: <answer>"
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -94,6 +99,7 @@ PY"""
         "metadata": {
             "purpose": "NeMo native Async GRPO with Polar live verifier dataset tasks",
             "source_schema": "NeMo Gym JSONL",
+            "answer_format": getattr(args, "answer_format", "none"),
             "reward_contract": (
                 "One NeMo Gym task row is sampled N times by the current policy; "
                 "each completion is scored by a deterministic verifier against "
@@ -209,12 +215,77 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-request-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--task-timeout-seconds", type=float, default=240.0)
     parser.add_argument("--test-timeout-seconds", type=float, default=60.0)
+    parser.add_argument("--answer-format", choices=("none", "final_answer"), default="none")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.35)
     parser.add_argument("--vllm-enforce-eager", default="true")
     parser.add_argument("--vllm-max-num-seqs", type=int)
     parser.add_argument("--vllm-max-num-batched-tokens", type=int)
     parser.add_argument("--script-path", default="")
     return parser.parse_args()
+
+
+def apply_answer_format(tasks: list[TaskSpec], answer_format: str) -> list[TaskSpec]:
+    if answer_format == "none":
+        return tasks
+    if answer_format != "final_answer":
+        raise ValueError(f"Unsupported answer format: {answer_format}")
+    return [_with_final_answer_instruction(task) for task in tasks]
+
+
+def _with_final_answer_instruction(task: TaskSpec) -> TaskSpec:
+    responses_create_params = dict(task.responses_create_params)
+    original_input = responses_create_params.get("input")
+    formatted_input = _append_instruction_to_input(original_input, FINAL_ANSWER_INSTRUCTION)
+    responses_create_params["input"] = formatted_input
+    prompt = _extract_prompt_text(formatted_input)
+    return replace(
+        task,
+        responses_create_params=responses_create_params,
+        prompt=prompt,
+        metadata={**task.metadata, "answer_format": "final_answer"},
+    )
+
+
+def _append_instruction_to_input(value: Any, instruction: str) -> Any:
+    if isinstance(value, str):
+        return _append_instruction(value, instruction)
+    if isinstance(value, list):
+        messages = [dict(message) if isinstance(message, dict) else message for message in value]
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "user") != "user":
+                continue
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, sort_keys=True)
+            messages[index] = {**message, "content": _append_instruction(content, instruction)}
+            return messages
+        return [*messages, {"role": "user", "content": instruction}]
+    return instruction if value is None else _append_instruction(str(value), instruction)
+
+
+def _append_instruction(text: str, instruction: str) -> str:
+    text = str(text or "").rstrip()
+    if instruction.casefold() in text.casefold():
+        return text
+    return f"{text}\n\n{instruction}" if text else instruction
+
+
+def _extract_prompt_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for message in value:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                parts.append(content)
+        return "\n\n".join(parts)
+    return str(value or "")
 
 
 def main() -> None:
@@ -227,7 +298,10 @@ def main() -> None:
         local_jsonl=args.local_jsonl,
         source_datasets=args.source_dataset,
     )
-    tasks = adapter.load_tasks(limit=args.limit, scan_rows=args.scan_rows)
+    tasks = apply_answer_format(
+        adapter.load_tasks(limit=args.limit, scan_rows=args.scan_rows),
+        args.answer_format,
+    )
     attempts = [task.to_attempt() for task in tasks]
 
     write_jsonl(output_dir / "data" / "train.jsonl", [task.to_train_row() for task in tasks])
@@ -245,6 +319,7 @@ def main() -> None:
                 "source_dataset_filter": args.source_dataset,
                 "canonical_schema": "nemo_gym_jsonl",
                 "selection_mode": "group_cycle",
+                "answer_format": args.answer_format,
             },
             "image": args.image,
             "model": {"name": args.model_name, "path": args.model_path},
@@ -288,6 +363,12 @@ def main() -> None:
                 "Live verifier scoring only: dataset answers define ground truth, "
                 "but reward is computed from each sampled completion."
             ),
+            "answer_format": {
+                "mode": args.answer_format,
+                "instruction": FINAL_ANSWER_INSTRUCTION
+                if args.answer_format == "final_answer"
+                else None,
+            },
             "grouping_contract": (
                 "One task per prompt group; num_generations_per_prompt live "
                 "completions are scored independently for that same task."
