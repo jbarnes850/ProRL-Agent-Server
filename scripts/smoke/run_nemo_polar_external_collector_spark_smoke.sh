@@ -13,6 +13,8 @@ STAMP="${1:-$(date +%Y%m%d-%H%M%S)}"
 shift || true
 EXTRA_OVERRIDES=("$@")
 RUN_DIR="${RUN_DIR:-/home/jarrodbarnes/nemo-rl-smoke/nemo-polar-qwen3-0p6b-${STAMP}}"
+RUN_START_EPOCH="$(date +%s)"
+RUN_START_TIME="$(date -Is)"
 HEAD_CONTAINER="nemo-polar-head-${STAMP}"
 WORKER_CONTAINER="nemo-polar-worker-${STAMP}"
 POLAR_ROLLOUT_PORT="${POLAR_ROLLOUT_PORT:-19080}"
@@ -62,6 +64,7 @@ POLAR_TASK_TIMEOUT_SECONDS="${POLAR_TASK_TIMEOUT_SECONDS:-300}"
 echo "This training run is worth doing because it will improve the go/no-go decision for Jarrod's two-Spark small-model agentic RL lab as measured by live NeMo Async GRPO consuming non-forced Polar rollouts from a real agentic dataset with valid tokens, logprobs, masks, grouped rewards, replay-buffer sampling, and weight sync, producing a run manifest and next-ablation decision."
 echo "run_dir=${RUN_DIR}"
 echo "image=${IMAGE}"
+echo "run_start_time=${RUN_START_TIME}"
 
 mkdir -p "${RUN_DIR}"/{data,logs,polar,ray-head,tmp,hf}
 ssh "${WORKER_SSH}" "mkdir -p '${RUN_DIR}'/{data,logs,ray-worker,tmp,hf}"
@@ -506,7 +509,38 @@ docker exec \
   " 2>&1 | tee "${RUN_DIR}/logs/grpo-nemo-polar.log"
 code=${PIPESTATUS[0]}
 set -e
+RUN_END_EPOCH="$(date +%s)"
+RUN_END_TIME="$(date -Is)"
+RUN_WALLCLOCK_SECONDS="$((RUN_END_EPOCH - RUN_START_EPOCH))"
 echo "docker_exec_exit_code=${code}" | tee "${RUN_DIR}/logs/exit-code.log"
+echo "run_end_time=${RUN_END_TIME}" | tee -a "${RUN_DIR}/logs/exit-code.log"
+echo "run_wallclock_seconds=${RUN_WALLCLOCK_SECONDS}" | tee -a "${RUN_DIR}/logs/exit-code.log"
+
+python3 - "${RUN_DIR}" "${RUN_START_TIME}" "${RUN_END_TIME}" "${RUN_WALLCLOCK_SECONDS}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+run_dir = Path(sys.argv[1])
+start_time = sys.argv[2]
+end_time = sys.argv[3]
+wallclock_seconds = int(sys.argv[4])
+timing = {
+    "event": "run_wallclock",
+    "start_time": start_time,
+    "end_time": end_time,
+    "wallclock_seconds": wallclock_seconds,
+}
+(run_dir / "run_timing.json").write_text(json.dumps(timing, indent=2, sort_keys=True) + "\n")
+metrics_path = run_dir / "metrics.jsonl"
+with metrics_path.open("a") as metrics_file:
+    metrics_file.write(json.dumps(timing, sort_keys=True) + "\n")
+config_path = run_dir / "config.json"
+if config_path.exists():
+    config = json.loads(config_path.read_text())
+    config["timing"] = timing
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+PY
 
 docker logs "${HEAD_CONTAINER}" --tail 160 > "${RUN_DIR}/logs/head-final.log" 2>&1 || true
 ssh "${WORKER_SSH}" "docker logs '${WORKER_CONTAINER}' --tail 160" > "${RUN_DIR}/logs/worker-final.log" 2>&1 || true
