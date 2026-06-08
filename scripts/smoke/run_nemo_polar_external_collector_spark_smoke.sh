@@ -18,8 +18,34 @@ WORKER_CONTAINER="nemo-polar-worker-${STAMP}"
 POLAR_ROLLOUT_PORT="${POLAR_ROLLOUT_PORT:-19080}"
 POLAR_GATEWAY_PORT="${POLAR_GATEWAY_PORT:-19100}"
 VLLM_HTTP_PORT="${VLLM_HTTP_PORT:-31000}"
+POLAR_DATASET_ID="${POLAR_DATASET_ID:-${AGENTIC_TRACE_DATASET_ID:-nvidia/Nemotron-RL-ReasoningGym-v1}}"
+POLAR_DATASET_CONFIG="${POLAR_DATASET_CONFIG:-${AGENTIC_TRACE_CONFIG:-default}}"
+POLAR_DATASET_SPLIT="${POLAR_DATASET_SPLIT:-${AGENTIC_TRACE_SPLIT:-train}}"
+POLAR_DATASET_LIMIT="${POLAR_DATASET_LIMIT:-${AGENTIC_TRACE_LIMIT:-2}}"
+POLAR_DATASET_SCAN_ROWS="${POLAR_DATASET_SCAN_ROWS:-${AGENTIC_TRACE_ROWS:-200}}"
+POLAR_DATASET_SOURCE_DATASETS="${POLAR_DATASET_SOURCE_DATASETS:-aiw}"
+POLAR_DATASET_RUNTIME_IMAGE="${POLAR_DATASET_RUNTIME_IMAGE:-${AGENTIC_TRACE_RUNTIME_IMAGE:-polar-spark-calculator:latest}}"
+POLAR_MODEL_NAME="${POLAR_MODEL_NAME:-Qwen/Qwen3-0.6B}"
+POLAR_MODEL_MAX_NEW_TOKENS="${POLAR_MODEL_MAX_NEW_TOKENS:-1024}"
+POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH="${POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH:-8192}"
+POLAR_MODEL_MAX_MODEL_LEN="${POLAR_MODEL_MAX_MODEL_LEN:-8192}"
+POLAR_MODEL_TEMPERATURE="${POLAR_MODEL_TEMPERATURE:-0.6}"
+POLAR_MODEL_TOP_P="${POLAR_MODEL_TOP_P:-0.95}"
+NEMO_GRPO_NUM_PROMPTS_PER_STEP="${NEMO_GRPO_NUM_PROMPTS_PER_STEP:-1}"
+NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT="${NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT:-2}"
+NEMO_GRPO_MAX_NUM_STEPS="${NEMO_GRPO_MAX_NUM_STEPS:-1}"
+NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS="${NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS:-1}"
+NEMO_POLICY_TRAIN_GLOBAL_BATCH_SIZE="${NEMO_POLICY_TRAIN_GLOBAL_BATCH_SIZE:-$((NEMO_GRPO_NUM_PROMPTS_PER_STEP * NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT))}"
+NEMO_DATA_TRAIN_SPLIT_VALIDATION_SIZE="${NEMO_DATA_TRAIN_SPLIT_VALIDATION_SIZE:-0.5}"
+NEMO_POLAR_ALLOW_ZERO_REWARD_STD="${NEMO_POLAR_ALLOW_ZERO_REWARD_STD:-0}"
+NEMO_POLAR_GROUP_WORKERS="${NEMO_POLAR_GROUP_WORKERS:-${NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT}}"
+POLAR_GATEWAY_MAX_INIT_WORKERS="${POLAR_GATEWAY_MAX_INIT_WORKERS:-${NEMO_POLAR_GROUP_WORKERS}}"
+POLAR_GATEWAY_MAX_RUN_WORKERS="${POLAR_GATEWAY_MAX_RUN_WORKERS:-${NEMO_POLAR_GROUP_WORKERS}}"
+POLAR_GATEWAY_MAX_POSTRUN_WORKERS="${POLAR_GATEWAY_MAX_POSTRUN_WORKERS:-${NEMO_POLAR_GROUP_WORKERS}}"
+POLAR_MODEL_REQUEST_TIMEOUT_SECONDS="${POLAR_MODEL_REQUEST_TIMEOUT_SECONDS:-180}"
+POLAR_TASK_TIMEOUT_SECONDS="${POLAR_TASK_TIMEOUT_SECONDS:-300}"
 
-echo "This training run is worth doing because it will improve the go/no-go decision for Jarrod's two-Spark RL lab as measured by a one-step live NeMo native Async GRPO trainer consuming Polar-produced grouped rollouts through NeMo's native replay buffer, producing evidence for or against the external Polar collector boundary."
+echo "This training run is worth doing because it will improve the go/no-go decision for Jarrod's two-Spark small-model agentic RL lab as measured by live NeMo Async GRPO consuming non-forced Polar rollouts from a real agentic dataset with valid tokens, logprobs, masks, grouped rewards, replay-buffer sampling, and weight sync, producing a run manifest and next-ablation decision."
 echo "run_dir=${RUN_DIR}"
 echo "image=${IMAGE}"
 
@@ -45,11 +71,45 @@ NCCL_DEBUG_SUBSYS=INIT,NET,ENV
 EOF
 scp -q "${RUN_DIR}/nccl.conf" "${WORKER_SSH}:${RUN_DIR}/nccl.conf"
 
+if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
+  SOURCE_ARGS=()
+  if [[ -n "${POLAR_DATASET_SOURCE_DATASETS}" ]]; then
+    IFS=',' read -ra SOURCE_DATASET_ITEMS <<< "${POLAR_DATASET_SOURCE_DATASETS}"
+    for source_dataset in "${SOURCE_DATASET_ITEMS[@]}"; do
+      SOURCE_ARGS+=(--source-dataset "${source_dataset}")
+    done
+  fi
+  PYTHONPATH="${REPO_HOST}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+  python3 -m nemo_polar_bridge.datasets.prepare_dataset \
+    --dataset-id "${POLAR_DATASET_ID}" \
+    --config "${POLAR_DATASET_CONFIG}" \
+    --split "${POLAR_DATASET_SPLIT}" \
+    --limit "${POLAR_DATASET_LIMIT}" \
+    --scan-rows "${POLAR_DATASET_SCAN_ROWS}" \
+    "${SOURCE_ARGS[@]}" \
+    --output-dir "${RUN_DIR}" \
+    --repo-host "${REPO_HOST}" \
+    --runtime-image "${POLAR_DATASET_RUNTIME_IMAGE}" \
+    --model-name "${POLAR_MODEL_NAME}" \
+    --model-path "${MODEL_CONT}" \
+    --image "${IMAGE}" \
+    --nemo-rl-ref "${NEMO_RL_REF}" \
+    --head-ip "${HEAD_IP}" \
+    --worker-ip "${WORKER_IP}" \
+    --polar-rollout-port "${POLAR_ROLLOUT_PORT}" \
+    --polar-gateway-port "${POLAR_GATEWAY_PORT}" \
+    --vllm-http-port "${VLLM_HTTP_PORT}" \
+    --model-max-tokens "${POLAR_MODEL_MAX_NEW_TOKENS}" \
+    --model-temperature "${POLAR_MODEL_TEMPERATURE}" \
+    --model-top-p "${POLAR_MODEL_TOP_P}" \
+    --model-request-timeout-seconds "${POLAR_MODEL_REQUEST_TIMEOUT_SECONDS}" \
+    --task-timeout-seconds "${POLAR_TASK_TIMEOUT_SECONDS}" \
+    --script-path "scripts/smoke/run_nemo_polar_external_collector_spark_smoke.sh"
+else
 cat > "${RUN_DIR}/data/train.jsonl" <<'JSONL'
 {"input":"Polar external collector smoke prompt.","output":"ok"}
 {"input":"Polar external collector smoke prompt 2.","output":"ok"}
 JSONL
-scp -q "${RUN_DIR}/data/train.jsonl" "${WORKER_SSH}:${RUN_DIR}/data/train.jsonl"
 
 cat > "${RUN_DIR}/polar/topology.yaml" <<YAML
 rollout:
@@ -67,9 +127,9 @@ gateway:
       host: 0.0.0.0
       port: ${POLAR_GATEWAY_PORT}
       public_url: http://${HEAD_IP}:${POLAR_GATEWAY_PORT}
-      max_init_workers: 2
-      max_run_workers: 2
-      max_postrun_workers: 2
+      max_init_workers: ${POLAR_GATEWAY_MAX_INIT_WORKERS}
+      max_run_workers: ${POLAR_GATEWAY_MAX_RUN_WORKERS}
+      max_postrun_workers: ${POLAR_GATEWAY_MAX_POSTRUN_WORKERS}
       model_served: ${MODEL_CONT}
       inference:
         engine: vllm
@@ -125,6 +185,34 @@ cat > "${RUN_DIR}/polar/task_template.json" <<JSON
   }
 }
 JSON
+fi
+if [[ ! -f "${RUN_DIR}/polar/topology.yaml" ]]; then
+cat > "${RUN_DIR}/polar/topology.yaml" <<YAML
+rollout:
+  host: 0.0.0.0
+  port: ${POLAR_ROLLOUT_PORT}
+  public_url: http://${HEAD_IP}:${POLAR_ROLLOUT_PORT}
+  save_dir: ${RUN_DIR}/polar/rollout_results
+  dispatch_poll_interval_seconds: 0.5
+  callback_grace_seconds: 60.0
+
+gateway:
+  heartbeat_interval_seconds: 5
+  nodes:
+    - id: nemo-polar-gateway
+      host: 0.0.0.0
+      port: ${POLAR_GATEWAY_PORT}
+      public_url: http://${HEAD_IP}:${POLAR_GATEWAY_PORT}
+      max_init_workers: ${POLAR_GATEWAY_MAX_INIT_WORKERS}
+      max_run_workers: ${POLAR_GATEWAY_MAX_RUN_WORKERS}
+      max_postrun_workers: ${POLAR_GATEWAY_MAX_POSTRUN_WORKERS}
+      model_served: ${MODEL_CONT}
+      inference:
+        engine: vllm
+        base_url: http://${HEAD_IP}:${VLLM_HTTP_PORT}
+YAML
+fi
+scp -q "${RUN_DIR}/data/train.jsonl" "${WORKER_SSH}:${RUN_DIR}/data/train.jsonl"
 rsync -az "${RUN_DIR}/polar/" "${WORKER_SSH}:${RUN_DIR}/polar/"
 
 docker rm -f "${HEAD_CONTAINER}" >/dev/null 2>&1 || true
@@ -180,6 +268,8 @@ COMMON_ENV=(
   -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP}
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP}
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP}
+  -e NEMO_POLAR_ALLOW_ZERO_REWARD_STD=${NEMO_POLAR_ALLOW_ZERO_REWARD_STD}
+  -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS}
 )
 
 COMMON_DOCKER=(
@@ -239,6 +329,8 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP} \
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP} \
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
+  -e NEMO_POLAR_ALLOW_ZERO_REWARD_STD=${NEMO_POLAR_ALLOW_ZERO_REWARD_STD} \
+  -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS} \
   "${IMAGE}" \
   bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --address=${HEAD_IP}:6379 --node-ip-address=${WORKER_IP} --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --disable-usage-stats --block" \
   > "${RUN_DIR}/worker.container.id"
@@ -288,17 +380,19 @@ docker exec \
   -e NEMO_POLAR_COLLECTOR_NODE_IP=${HEAD_IP} \
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP} \
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
+  -e NEMO_POLAR_ALLOW_ZERO_REWARD_STD=${NEMO_POLAR_ALLOW_ZERO_REWARD_STD} \
+  -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS} \
   "${HEAD_CONTAINER}" bash -lc "
     cd /opt/nemo-rl
-    python /work/ProRL-Agent-Server/src/nemo_polar_bridge/run_grpo_with_polar.py \
+    python -m nemo_polar_bridge.run_grpo_with_polar \
       --config examples/configs/recipes/llm/grpo-qwen3-0.6b-1n8g-sglang.yaml \
       grpo.async_grpo.enabled=true \
-      grpo.async_grpo.max_trajectory_age_steps=1 \
+      grpo.async_grpo.max_trajectory_age_steps=${NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS} \
       grpo.async_grpo.in_flight_weight_updates=true \
       grpo.async_grpo.recompute_kv_cache_after_weight_updates=false \
-      grpo.num_prompts_per_step=1 \
-      grpo.num_generations_per_prompt=2 \
-      grpo.max_num_steps=1 \
+      grpo.num_prompts_per_step=${NEMO_GRPO_NUM_PROMPTS_PER_STEP} \
+      grpo.num_generations_per_prompt=${NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT} \
+      grpo.max_num_steps=${NEMO_GRPO_MAX_NUM_STEPS} \
       grpo.max_num_epochs=1 \
       grpo.val_at_start=false \
       grpo.val_at_end=false \
@@ -312,23 +406,27 @@ docker exec \
       policy.model_name=${MODEL_CONT} \
       policy.tokenizer.name=${MODEL_CONT} \
       +policy.dtensor_cfg.automodel_kwargs.force_hf=true \
-      policy.train_global_batch_size=2 \
+      policy.train_global_batch_size=${NEMO_POLICY_TRAIN_GLOBAL_BATCH_SIZE} \
       policy.train_micro_batch_size=1 \
       policy.logprob_batch_size=1 \
       policy.generation_batch_size=1 \
-      policy.max_total_sequence_length=256 \
+      policy.max_total_sequence_length=${POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH} \
       policy.sequence_packing.enabled=false \
       policy.dynamic_batching.enabled=false \
       policy.generation.backend=vllm \
-      policy.generation.max_new_tokens=8 \
+      policy.generation.max_new_tokens=${POLAR_MODEL_MAX_NEW_TOKENS} \
+      policy.generation.temperature=${POLAR_MODEL_TEMPERATURE} \
+      policy.generation.top_p=${POLAR_MODEL_TOP_P} \
+      policy.generation.top_k=null \
       policy.generation.port_range_low=${VLLM_HTTP_PORT} \
       policy.generation.port_range_high=$((VLLM_HTTP_PORT + 1)) \
       policy.generation.vllm_cfg.async_engine=true \
       +policy.generation.vllm_cfg.expose_http_server=true \
       policy.generation.vllm_cfg.enable_vllm_metrics_logger=false \
-      policy.generation.vllm_cfg.max_model_len=256 \
+      policy.generation.vllm_cfg.max_model_len=${POLAR_MODEL_MAX_MODEL_LEN} \
       policy.generation.vllm_cfg.gpu_memory_utilization=0.35 \
       policy.generation.vllm_cfg.enforce_eager=true \
+      +policy.generation.vllm_kwargs.generation_config=vllm \
       policy.generation.colocated.enabled=false \
       policy.generation.colocated.resources.gpus_per_node=1 \
       policy.generation.colocated.resources.num_nodes=1 \
@@ -336,7 +434,7 @@ docker exec \
       +data.train.data_path=/work/data/train.jsonl \
       +data.train.input_key=input \
       +data.train.output_key=output \
-      data.train.split_validation_size=0.5 \
+      data.train.split_validation_size=${NEMO_DATA_TRAIN_SPLIT_VALIDATION_SIZE} \
       data.default.processor=math_hf_data_processor \
       data.default.env_name=math \
       env.math.num_workers=1 \
@@ -370,7 +468,7 @@ for pattern in \
   "Started Polar external trajectory collection" \
   "Polar collector adding group" \
   "ReplayBuffer.add: Adding trajectory" \
-  "Sampled 1 trajectory groups from buffer" \
+  "Sampled " \
   "Synchronizing policy weights to trajectory collector" \
   "Async GRPO training complete"; do
   if ! grep -q "${pattern}" "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
@@ -379,10 +477,19 @@ for pattern in \
   fi
 done
 
-if ! grep -Eq "Polar collector adding group .*reward_std=0\\.[1-9]" \
-  "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
-  echo "missing_success_pattern=nonzero_polar_reward_std" | tee -a "${RUN_DIR}/logs/exit-code.log"
-  ok=0
+if [[ "${NEMO_POLAR_ALLOW_ZERO_REWARD_STD}" == "1" ]]; then
+  if ! grep -q "allowing near-zero reward variance for plumbing verification" \
+    "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
+    echo "missing_success_pattern=zero_reward_std_plumbing_marker" \
+      | tee -a "${RUN_DIR}/logs/exit-code.log"
+    ok=0
+  fi
+else
+  if ! grep -Eq "Polar collector adding group .*reward_std=0\\.[1-9]" \
+    "${RUN_DIR}/logs/grpo-nemo-polar.log"; then
+    echo "missing_success_pattern=nonzero_polar_reward_std" | tee -a "${RUN_DIR}/logs/exit-code.log"
+    ok=0
+  fi
 fi
 
 if [[ "${code}" -ne 0 || "${ok}" -ne 1 ]]; then

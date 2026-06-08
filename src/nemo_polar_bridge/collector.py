@@ -9,6 +9,7 @@ same per-prompt replay-buffer group shape NeMo already samples.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
 import json
@@ -45,6 +46,52 @@ def _format_value(value: Any, context: dict[str, Any]) -> Any:
 
 def _load_json(path: str | os.PathLike[str]) -> Any:
     return json.loads(Path(path).read_text())
+
+
+def env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, *, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return int(value)
+
+
+def normalize_attempt_matrix(raw_matrix: Any) -> tuple[list[dict[str, Any]] | None, str]:
+    """Normalize legacy and dataset attempt matrices.
+
+    Legacy smoke matrices are lists and cycle attempts across generations.
+    Dataset matrices are envelopes with ``selection_mode=group_cycle`` so each
+    GRPO group uses one task repeated for every sampled completion.
+    """
+
+    if raw_matrix is None:
+        return None, "generation_cycle"
+    if isinstance(raw_matrix, dict):
+        attempts = raw_matrix.get("attempts") or []
+        if not isinstance(attempts, list):
+            raise ValueError("attempt_matrix.attempts must be a list")
+        return list(attempts), str(raw_matrix.get("selection_mode") or "group_cycle")
+    if isinstance(raw_matrix, list):
+        return list(raw_matrix), "generation_cycle"
+    raise ValueError("attempt_matrix must be a list or object")
+
+
+def select_attempts_for_group(
+    attempts: list[dict[str, Any]],
+    *,
+    selection_mode: str,
+    group_id: int,
+    num_generations: int,
+) -> list[dict[str, Any]]:
+    if selection_mode == "group_cycle":
+        return [attempts[group_id % len(attempts)] for _ in range(num_generations)]
+    return [attempts[i % len(attempts)] for i in range(num_generations)]
 
 
 def _post_json(url: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
@@ -331,11 +378,25 @@ class _PolarAsyncTrajectoryCollector:
         self._gateway_url = os.environ.get("NEMO_POLAR_GATEWAY_URL", "").rstrip("/")
         self._task_template = _load_json(os.environ["NEMO_POLAR_TASK_TEMPLATE_PATH"])
         matrix_path = os.environ.get("NEMO_POLAR_ATTEMPT_MATRIX_PATH")
-        self._attempt_matrix = _load_json(matrix_path) if matrix_path else None
+        self._attempt_selection_mode = "generation_cycle"
+        self._attempt_matrix = None
+        self._allow_zero_reward_std = env_flag("NEMO_POLAR_ALLOW_ZERO_REWARD_STD")
+        self._group_collection_workers = max(1, env_int("NEMO_POLAR_GROUP_WORKERS", default=1))
+        if matrix_path:
+            self._attempt_matrix, self._attempt_selection_mode = normalize_attempt_matrix(
+                _load_json(matrix_path)
+            )
         print("🌐 Using Polar external rollout collector")
         print(f"   rollout_url={self._rollout_url}")
         print(f"   gateway_url={self._gateway_url or 'unset'}")
         print(f"   vllm_http={self._openai_server_base_url() or 'unknown'}")
+        print(f"   allow_zero_reward_std={self._allow_zero_reward_std}")
+        print(f"   group_collection_workers={self._group_collection_workers}")
+        if self._attempt_matrix is not None:
+            print(
+                "   attempt_matrix="
+                f"{len(self._attempt_matrix)} mode={self._attempt_selection_mode}"
+            )
 
     def _openai_server_base_url(self) -> str | None:
         urls = getattr(self.policy_generation, "dp_openai_server_base_urls", None)
@@ -350,10 +411,12 @@ class _PolarAsyncTrajectoryCollector:
         return int(self.master_config.grpo["async_grpo"]["max_trajectory_age_steps"])
 
     def _target_weights(self, generation_weight_version: int) -> list[int]:
-        max_age = self._max_age()
-        if generation_weight_version == self.initial_weight_version:
-            return list(range(self.initial_weight_version, self.initial_weight_version + max_age + 1))
-        return [generation_weight_version + i for i in range(1, max_age + 1)]
+        return target_weights_for_generation(
+            generation_weight_version=generation_weight_version,
+            initial_weight_version=self.initial_weight_version,
+            max_age=self._max_age(),
+            max_num_steps=int(self.master_config.grpo["max_num_steps"]),
+        )
 
     def _next_target(self, generation_weight_version: int) -> int | None:
         import ray
@@ -412,19 +475,22 @@ class _PolarAsyncTrajectoryCollector:
 
     def _loop(self) -> None:
         try:
-            for _batch in self.dataloader:
-                if not self.running:
-                    break
+            while self.running:
                 self._pause.wait()
                 self._refit_pause.wait()
                 target = self._next_target(self.current_weight_version)
                 if target is None:
                     time.sleep(0.5)
                     continue
-                self._collect_group(
-                    generation_weight_version=self.current_weight_version,
-                    target_weight_version=target,
-                )
+                for _ in range(prompts_per_target(self.master_config)):
+                    if not self.running:
+                        break
+                    self._pause.wait()
+                    self._refit_pause.wait()
+                    self._collect_group(
+                        generation_weight_version=self.current_weight_version,
+                        target_weight_version=target,
+                    )
         except Exception:
             print("❌ Polar collector failed")
             traceback.print_exc()
@@ -451,18 +517,31 @@ class _PolarAsyncTrajectoryCollector:
         }
         attempts = self._attempt_matrix
         if attempts:
-            selected = [attempts[i % len(attempts)] for i in range(num_generations)]
-            task_results = [
-                self._submit_attempt(
-                    _render_attempt_payload(
-                        self._task_template,
-                        context={**context, "attempt_index": i, "task_id": f"{context['task_id']}-a{i}"},
-                        num_samples=1,
-                        attempt=attempt,
-                    )
+            selected = select_attempts_for_group(
+                attempts,
+                selection_mode=self._attempt_selection_mode,
+                group_id=group_id,
+                num_generations=num_generations,
+            )
+            payloads = [
+                _render_attempt_payload(
+                    self._task_template,
+                    context={
+                        **context,
+                        "attempt_index": i,
+                        "task_id": f"{context['task_id']}-a{i}",
+                    },
+                    num_samples=1,
+                    attempt=attempt,
                 )
                 for i, attempt in enumerate(selected)
             ]
+            max_workers = min(num_generations, self._group_collection_workers)
+            if max_workers > 1:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    task_results = list(executor.map(self._submit_attempt, payloads))
+            else:
+                task_results = [self._submit_attempt(payload) for payload in payloads]
         else:
             payload = _render_attempt_payload(
                 self._task_template,
@@ -474,6 +553,23 @@ class _PolarAsyncTrajectoryCollector:
         group = build_nemo_trajectory_group(task_results, tokenizer=self.tokenizer)
         rewards = group["batch"]["total_reward"].tolist()
         reward_std = group["rollout_metrics"]["polar/reward_std"]
+        valid_sessions = group["rollout_metrics"]["polar/valid_sessions"]
+        group_sessions = group["rollout_metrics"]["polar/group_sessions"]
+        if valid_sessions < group_sessions:
+            raise RuntimeError(
+                "Polar collector refusing invalid group before replay-buffer add: "
+                f"valid_sessions={valid_sessions} group_sessions={group_sessions}"
+            )
+        if reward_std < 1e-5 and not self._allow_zero_reward_std:
+            raise RuntimeError(
+                "Polar collector refusing near-zero reward variance before replay-buffer add: "
+                f"rewards={rewards} reward_std={reward_std:.6f}"
+            )
+        if reward_std < 1e-5:
+            print(
+                "⚠️ Polar collector allowing near-zero reward variance for plumbing verification: "
+                f"rewards={rewards} reward_std={reward_std:.6f}"
+            )
         print(
             "📦 Polar collector adding group "
             f"group_id={group_id} weight={generation_weight_version} "
@@ -528,6 +624,25 @@ def reward_std(values: list[float]) -> float:
         return 0.0
     mean = sum(values) / len(values)
     return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+
+
+def prompts_per_target(master_config: Any) -> int:
+    return max(1, int(master_config.grpo["num_prompts_per_step"]))
+
+
+def target_weights_for_generation(
+    *,
+    generation_weight_version: int,
+    initial_weight_version: int,
+    max_age: int,
+    max_num_steps: int,
+) -> list[int]:
+    if generation_weight_version == initial_weight_version:
+        candidates = list(range(initial_weight_version, initial_weight_version + max_age + 1))
+    else:
+        candidates = [generation_weight_version + i for i in range(1, max_age + 1)]
+    max_target = initial_weight_version + max_num_steps - 1
+    return [target for target in candidates if target <= max_target]
 
 
 def stable_bucket(value: str, modulo: int) -> int:
