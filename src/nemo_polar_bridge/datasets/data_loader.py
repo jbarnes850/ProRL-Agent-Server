@@ -16,6 +16,23 @@ from nemo_polar_bridge.datasets.base import DatasetAdapter, TaskSpec
 DEFAULT_NEMO_GYM_DATASET_ID = "nvidia/Nemotron-RL-ReasoningGym-v1"
 DEFAULT_REASONING_GYM_DATASET_ID = DEFAULT_NEMO_GYM_DATASET_ID
 DATASETS_SERVER = "https://datasets-server.huggingface.co"
+AGENTIC_METADATA_KEYS = (
+    "environment_ref",
+    "resource_ref",
+    "resources_ref",
+    "resources_server",
+    "runtime_ref",
+    "verifier_ref",
+    "max_turns",
+    "max_steps",
+    "max_rollout_turns",
+    "tool_schema",
+    "tools",
+    "state",
+    "initial_state",
+    "seed",
+    "session",
+)
 
 
 class NeMoGymDatasetAdapter(DatasetAdapter):
@@ -133,7 +150,10 @@ def normalize_to_gym_row(row: dict[str, Any]) -> dict[str, Any]:
                 "input": [{"role": "user", "content": str(prompt)}]
             }
     if "expected_answer" not in normalized and "answer" not in normalized:
-        answer = _first_present(normalized, ("target", "output", "label"))
+        answer = _first_present(
+            normalized,
+            ("target", "output", "label", "ground_truth", "exp_cal_state"),
+        )
         if answer is not None:
             normalized["answer"] = answer
     return normalized
@@ -155,9 +175,12 @@ def task_from_gym_row(
     answer = row.get("answer", row.get("expected_answer"))
     if not prompt or answer in (None, ""):
         return None
+    answer_text = answer if isinstance(answer, str) else json.dumps(answer, sort_keys=True)
 
     metadata = _parse_metadata(row.get("metadata"))
     source_dataset = _string_or_none(metadata.get("source_dataset") or row.get("source_dataset"))
+    if source_dataset is None:
+        source_dataset = _infer_source_dataset(dataset_id)
     task_id = _string_or_none(
         row.get("uuid")
         or row.get("id")
@@ -172,12 +195,18 @@ def task_from_gym_row(
     agent_ref = row.get("agent_ref")
     if agent_ref is not None and not isinstance(agent_ref, dict):
         agent_ref = {"raw": agent_ref}
+    metadata = _with_agentic_metadata(
+        metadata,
+        row=row,
+        responses_create_params=responses_create_params,
+        agent_ref=agent_ref,
+    )
 
     return TaskSpec(
         task_id=task_id,
         responses_create_params=responses_create_params,
         prompt=prompt,
-        answer=str(answer),
+        answer=str(answer_text),
         dataset_id=dataset_id,
         split=split,
         config=config,
@@ -186,7 +215,12 @@ def task_from_gym_row(
         cohort=source_dataset or _agent_ref_name(agent_ref),
         metadata=metadata,
         agent_ref=agent_ref,
-        verifier_name=str(row.get("verifier") or metadata.get("verifier") or "exact_normalized"),
+        verifier_name=str(
+            row.get("verifier")
+            or metadata.get("verifier")
+            or _infer_verifier_name(dataset_id)
+            or "exact_normalized"
+        ),
         license=_string_or_none(row.get("license")),
     )
 
@@ -286,11 +320,49 @@ def _parse_metadata(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _with_agentic_metadata(
+    metadata: dict[str, Any],
+    *,
+    row: dict[str, Any],
+    responses_create_params: dict[str, Any],
+    agent_ref: dict[str, Any] | None,
+) -> dict[str, Any]:
+    agentic = dict(metadata.get("agentic") or {})
+    for key in AGENTIC_METADATA_KEYS:
+        if key in row and row[key] not in (None, ""):
+            agentic.setdefault(key, row[key])
+    if "tools" in responses_create_params and responses_create_params["tools"]:
+        agentic.setdefault("tools", responses_create_params["tools"])
+    if "tool_choice" in responses_create_params and responses_create_params["tool_choice"]:
+        agentic.setdefault("tool_choice", responses_create_params["tool_choice"])
+    if agent_ref:
+        agentic.setdefault("agent_ref", agent_ref)
+    if not agentic:
+        return metadata
+    return {**metadata, "agentic": agentic}
+
+
 def _string_or_none(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _infer_source_dataset(dataset_id: str) -> str | None:
+    normalized = dataset_id.casefold()
+    if "calendar" in normalized:
+        return "calendar"
+    if "workplace" in normalized:
+        return "workplace"
+    return None
+
+
+def _infer_verifier_name(dataset_id: str) -> str | None:
+    normalized = dataset_id.casefold()
+    if "calendar" in normalized:
+        return "calendar_gym"
+    return None
 
 
 def _agent_ref_name(agent_ref: Any) -> str | None:

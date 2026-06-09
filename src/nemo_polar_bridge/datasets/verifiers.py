@@ -60,6 +60,9 @@ def verify_completion(completion: str, task: TaskSpec) -> VerifierResult:
     """
 
     source = (task.source_dataset or "").casefold()
+    verifier_name = (task.verifier_name or "").casefold()
+    if source == "calendar" or verifier_name == "calendar_gym":
+        return _verify_calendar_gym(completion, task)
     if source == "cryptarithm":
         return _verify_cryptarithm(completion, task)
     if source == "manipulate_matrix":
@@ -141,6 +144,162 @@ def _verify_tower_of_hanoi(completion: str, task: TaskSpec) -> VerifierResult:
     # This is intentionally strict and deterministic; richer state simulation can
     # be added without changing the DatasetAdapter contract.
     return _verify_exact(completion, task)
+
+
+def _verify_calendar_gym(completion: str, task: TaskSpec) -> VerifierResult:
+    expected = _coerce_jsonish(task.answer)
+    exp_cal_state = _normalize_calendar_state(expected)
+    reward, reason = _grade_calendar_response(completion, exp_cal_state)
+    passed = reward > 0
+    return VerifierResult(
+        passed=passed,
+        reward=float(reward),
+        reason=f"calendar_gym_{reason}",
+        normalized_completion=json.dumps(_extract_calendar_json_list(completion), sort_keys=True),
+        normalized_answer=json.dumps(exp_cal_state, sort_keys=True),
+        metadata={
+            "verifier": "calendar_gym",
+            "resource_server": "resources_servers/calendar",
+            "compatible_with": "NVIDIA-NeMo/Gym/resources_servers/calendar/utils.py",
+            "expected_event_count": len(exp_cal_state),
+        },
+    )
+
+
+def _normalize_calendar_state(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for event_id, event in value.items():
+        if not isinstance(event, dict):
+            continue
+        normalized[str(event_id)] = event
+    return normalized
+
+
+def _grade_calendar_response(
+    assistant_response: str,
+    exp_cal_state: dict[str, dict[str, Any]],
+) -> tuple[int, str]:
+    # Mirrors NVIDIA-NeMo/Gym resources_servers/calendar/utils.py.
+    if "<think>" in assistant_response:
+        return 0, "think_found"
+    if len(exp_cal_state) == 0:
+        return 1, "pass"
+    try:
+        cal_state = _extract_calendar_json_list(assistant_response)
+        if cal_state is None or len(cal_state) == 0:
+            return 0, "no_json_list"
+
+        events_dict: dict[str, dict[str, Any]] = {}
+        for event in cal_state:
+            if not isinstance(event, dict) or "event_id" not in event:
+                return 0, "error_in_grading"
+            events_dict[str(event["event_id"])] = event
+
+        if len(events_dict) != len(exp_cal_state):
+            return 0, "different_number_of_events"
+
+        for event in cal_state:
+            if _is_calendar_event_conflicting(cal_state, event, exclude_event=event):
+                return 0, "conflicting_events"
+
+        for event_id, expected_event in exp_cal_state.items():
+            if event_id not in events_dict:
+                return 0, "different_number_of_events"
+            if not _is_calendar_constraint_satisfied(events_dict[event_id], expected_event):
+                return 0, "constraint_violated"
+    except Exception:
+        return 0, "error_in_grading"
+    return 1, "pass"
+
+
+def _extract_calendar_json_list(text: str) -> list[Any] | None:
+    pattern = r"\[(?:[^\[\]]|\{[^}]*\})*\{(?:[^\[\]]|\{[^}]*\})*\}(?:[^\[\]]|\{[^}]*\})*\]"
+    match = re.search(pattern, str(text or ""), re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def _calendar_time_to_minutes(time_str: str) -> int:
+    time_str = str(time_str).strip().lower()
+    if "am" in time_str or "pm" in time_str:
+        if ":" not in time_str:
+            if "am" in time_str:
+                hour = int(time_str.replace("am", ""))
+                return hour * 60 if hour != 12 else 0
+            if "pm" in time_str:
+                hour = int(time_str.replace("pm", ""))
+                return (hour * 60 if hour != 12 else 0) + 12 * 60
+        if "am" in time_str:
+            hour, minute = map(int, time_str.replace("am", "").split(":"))
+            return (hour * 60 if hour != 12 else 0) + minute
+        if "pm" in time_str:
+            hour, minute = map(int, time_str.replace("pm", "").split(":"))
+            return ((hour * 60 if hour != 12 else 0) + 12 * 60) + minute
+        raise ValueError(f"Unable to parse time: {time_str}")
+    hours, minutes = map(int, time_str.split(":"))
+    return hours * 60 + minutes
+
+
+def _is_calendar_event_conflicting(
+    events: list[dict[str, Any]],
+    check_event: dict[str, Any],
+    *,
+    exclude_event: dict[str, Any] | None = None,
+) -> bool:
+    event_start = _calendar_time_to_minutes(str(check_event["start_time"]))
+    event_end = event_start + int(check_event["duration"])
+    for existing in events:
+        if exclude_event and existing == exclude_event:
+            continue
+        existing_start = _calendar_time_to_minutes(str(existing["start_time"]))
+        existing_end = existing_start + int(existing["duration"])
+        if not (event_end <= existing_start or event_start >= existing_end):
+            return True
+    return False
+
+
+def _is_calendar_constraint_satisfied(
+    event: dict[str, Any],
+    expected_event: dict[str, Any],
+) -> bool:
+    if int(event["duration"]) != int(expected_event["duration"]):
+        return False
+
+    min_time = _calendar_time_to_minutes(str(expected_event["min_time"]))
+    max_time = _calendar_time_to_minutes(str(expected_event["max_time"]))
+    event_start = _calendar_time_to_minutes(str(event["start_time"]))
+    event_end = event_start + int(event["duration"])
+    if event_start < min_time or event_end > max_time:
+        return False
+
+    constraint = expected_event.get("constraint")
+    if constraint is None:
+        return True
+    constraint = str(constraint)
+    if constraint.startswith("before "):
+        constraint_time = _calendar_time_to_minutes(constraint.replace("before ", ""))
+        return event_end <= constraint_time
+    if constraint.startswith("after "):
+        constraint_time = _calendar_time_to_minutes(constraint.replace("after ", ""))
+        return event_start >= constraint_time
+    if constraint.startswith("between "):
+        parts = constraint.replace("between ", "").split(" and ")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid 'between' constraint format: {constraint}")
+        time_x = _calendar_time_to_minutes(parts[0])
+        time_y = _calendar_time_to_minutes(parts[1])
+        return event_start >= time_x and event_end <= time_y
+    if constraint.startswith("at "):
+        constraint_time = _calendar_time_to_minutes(constraint.replace("at ", ""))
+        return event_start == constraint_time
+    return True
 
 
 def _coerce_jsonish(value: str) -> Any | None:
@@ -256,8 +415,26 @@ def coerce_jsonish(value):
 
 def verify_completion(completion, task):
     source = str(task.get("source_dataset") or "").casefold()
+    verifier_name = str(task.get("verifier_name") or "").casefold()
     expected_text = str(task.get("answer") or "")
     candidate_raw = extract_candidate_answer(completion)
+    if source == "calendar" or verifier_name == "calendar_gym":
+        exp_cal_state = normalize_calendar_state(coerce_jsonish(expected_text))
+        reward, reason = grade_calendar_response(completion, exp_cal_state)
+        passed = reward > 0
+        return {
+            "passed": passed,
+            "reward": float(reward),
+            "reason": "calendar_gym_" + reason,
+            "normalized_completion": json.dumps(extract_calendar_json_list(completion), sort_keys=True),
+            "normalized_answer": json.dumps(exp_cal_state, sort_keys=True),
+            "metadata": {
+                "verifier": "calendar_gym",
+                "resource_server": "resources_servers/calendar",
+                "compatible_with": "NVIDIA-NeMo/Gym/resources_servers/calendar/utils.py",
+                "expected_event_count": len(exp_cal_state),
+            },
+        }
     if source == "cryptarithm":
         expected_map = parse_assignment_map(expected_text)
         candidate_map = parse_assignment_map(candidate_raw)
@@ -348,4 +525,110 @@ def parse_numeric_grid(value):
 
 def format_numeric_grid(value):
     return "\n".join(" ".join(str(cell) for cell in row) for row in value)
+
+def normalize_calendar_state(value):
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    for event_id, event in value.items():
+        if isinstance(event, dict):
+            normalized[str(event_id)] = event
+    return normalized
+
+def grade_calendar_response(assistant_response, exp_cal_state):
+    if "<think>" in str(assistant_response):
+        return 0, "think_found"
+    if len(exp_cal_state) == 0:
+        return 1, "pass"
+    try:
+        cal_state = extract_calendar_json_list(assistant_response)
+        if cal_state is None or len(cal_state) == 0:
+            return 0, "no_json_list"
+        events_dict = {}
+        for event in cal_state:
+            if not isinstance(event, dict) or "event_id" not in event:
+                return 0, "error_in_grading"
+            events_dict[str(event["event_id"])] = event
+        if len(events_dict) != len(exp_cal_state):
+            return 0, "different_number_of_events"
+        for event in cal_state:
+            if is_calendar_event_conflicting(cal_state, event, exclude_event=event):
+                return 0, "conflicting_events"
+        for event_id, expected_event in exp_cal_state.items():
+            if event_id not in events_dict:
+                return 0, "different_number_of_events"
+            if not is_calendar_constraint_satisfied(events_dict[event_id], expected_event):
+                return 0, "constraint_violated"
+    except Exception:
+        return 0, "error_in_grading"
+    return 1, "pass"
+
+def extract_calendar_json_list(text):
+    pattern = r"\[(?:[^\[\]]|\{[^}]*\})*\{(?:[^\[\]]|\{[^}]*\})*\}(?:[^\[\]]|\{[^}]*\})*\]"
+    match = re.search(pattern, str(text or ""), re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+def calendar_time_to_minutes(time_str):
+    time_str = str(time_str).strip().lower()
+    if "am" in time_str or "pm" in time_str:
+        if ":" not in time_str:
+            if "am" in time_str:
+                hour = int(time_str.replace("am", ""))
+                return hour * 60 if hour != 12 else 0
+            if "pm" in time_str:
+                hour = int(time_str.replace("pm", ""))
+                return (hour * 60 if hour != 12 else 0) + 12 * 60
+        if "am" in time_str:
+            hour, minute = map(int, time_str.replace("am", "").split(":"))
+            return (hour * 60 if hour != 12 else 0) + minute
+        if "pm" in time_str:
+            hour, minute = map(int, time_str.replace("pm", "").split(":"))
+            return ((hour * 60 if hour != 12 else 0) + 12 * 60) + minute
+        raise ValueError("Unable to parse time: " + str(time_str))
+    hours, minutes = map(int, time_str.split(":"))
+    return hours * 60 + minutes
+
+def is_calendar_event_conflicting(events, check_event, exclude_event=None):
+    event_start = calendar_time_to_minutes(check_event["start_time"])
+    event_end = event_start + int(check_event["duration"])
+    for existing in events:
+        if exclude_event and existing == exclude_event:
+            continue
+        existing_start = calendar_time_to_minutes(existing["start_time"])
+        existing_end = existing_start + int(existing["duration"])
+        if not (event_end <= existing_start or event_start >= existing_end):
+            return True
+    return False
+
+def is_calendar_constraint_satisfied(event, expected_event):
+    if int(event["duration"]) != int(expected_event["duration"]):
+        return False
+    min_time = calendar_time_to_minutes(expected_event["min_time"])
+    max_time = calendar_time_to_minutes(expected_event["max_time"])
+    event_start = calendar_time_to_minutes(event["start_time"])
+    event_end = event_start + int(event["duration"])
+    if event_start < min_time or event_end > max_time:
+        return False
+    constraint = expected_event.get("constraint")
+    if constraint is None:
+        return True
+    constraint = str(constraint)
+    if constraint.startswith("before "):
+        return event_end <= calendar_time_to_minutes(constraint.replace("before ", ""))
+    if constraint.startswith("after "):
+        return event_start >= calendar_time_to_minutes(constraint.replace("after ", ""))
+    if constraint.startswith("between "):
+        parts = constraint.replace("between ", "").split(" and ")
+        if len(parts) != 2:
+            raise ValueError("Invalid between constraint: " + constraint)
+        return event_start >= calendar_time_to_minutes(parts[0]) and event_end <= calendar_time_to_minutes(parts[1])
+    if constraint.startswith("at "):
+        return event_start == calendar_time_to_minutes(constraint.replace("at ", ""))
+    return True
 '''

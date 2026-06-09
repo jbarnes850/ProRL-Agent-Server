@@ -62,6 +62,7 @@ def test_build_task_template_uses_live_verifier_evaluator() -> None:
         model_top_p=0.95,
         model_request_timeout_seconds=120.0,
         answer_format="none",
+        execution_type="single_turn_chat",
     )
 
     template = build_task_template(args)
@@ -71,6 +72,31 @@ def test_build_task_template_uses_live_verifier_evaluator() -> None:
     command = template["agent"]["custom_shell"]["command"]
     assert "responses_create_params" in command
     assert "verify_completion" in command
+
+
+def test_build_task_template_supports_multi_turn_chat_tool_execution() -> None:
+    args = SimpleNamespace(
+        runtime_image="polar-spark-calculator:latest",
+        task_timeout_seconds=240.0,
+        model_name="Qwen/Qwen3-1.7B",
+        test_timeout_seconds=60.0,
+        model_max_tokens=64,
+        model_temperature=0.6,
+        model_top_p=0.95,
+        model_request_timeout_seconds=120.0,
+        answer_format="none",
+        execution_type="multi_turn_chat_tool",
+    )
+
+    template = build_task_template(args)
+
+    assert template["metadata"]["execution_type"] == "multi_turn_chat_tool"
+    command = template["agent"]["custom_shell"]["command"]
+    assert "multi_turn_transcript.json" in command
+    assert "tool_observations" in command
+    assert "verify_task(" in command
+    assert "POLAR_GYM_RESOURCE_VERIFY_URL" in command
+    assert "nemo_gym_response" in command
 
 
 def test_apply_final_answer_format_appends_to_last_user_message() -> None:

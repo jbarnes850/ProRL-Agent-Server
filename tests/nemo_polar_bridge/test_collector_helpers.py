@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from nemo_polar_bridge.collector import (
+    _flatten_traces_for_nemo,
     env_flag,
     env_int,
     normalize_openai_base_url,
@@ -97,3 +98,41 @@ def test_legacy_attempt_matrix_cycles_per_generation() -> None:
         group_id=4,
         num_generations=3,
     ) == [{"name": "pass"}, {"name": "fail"}, {"name": "pass"}]
+
+
+def test_flatten_traces_preserves_two_turn_assistant_tokens_and_masks() -> None:
+    trace = _flatten_traces_for_nemo(
+        [
+            {
+                "prompt_ids": [1, 2, 3],
+                "response_ids": [10, 11, 99],
+                "response_logprobs": [-0.1, -0.2, -0.3],
+                "loss_mask": [1, 1, 1],
+                "prompt_messages": [{"role": "user", "content": "Q1"}],
+                "response_messages": [{"role": "assistant", "content": "A1"}],
+                "reward": None,
+                "finish_reason": "stop",
+            },
+            {
+                "prompt_ids": [1, 2, 3, 10, 11, 99, 50, 51],
+                "response_ids": [20, 21, 99],
+                "response_logprobs": [-0.5, -0.6, -0.7],
+                "loss_mask": [1, 1, 1],
+                "prompt_messages": [
+                    {"role": "user", "content": "Q1"},
+                    {"role": "assistant", "content": "A1"},
+                    {"role": "tool", "content": "result"},
+                ],
+                "response_messages": [{"role": "assistant", "content": "A2"}],
+                "reward": 1.0,
+                "finish_reason": "stop",
+            },
+        ]
+    )
+
+    assert trace["prompt_ids"] == [1, 2, 3]
+    assert trace["response_ids"] == [10, 11, 99, 50, 51, 20, 21, 99]
+    assert trace["response_logprobs"] == [-0.1, -0.2, -0.3, 0.0, 0.0, -0.5, -0.6, -0.7]
+    assert trace["loss_mask"] == [1, 1, 1, 0, 0, 1, 1, 1]
+    assert trace["reward"] == 1.0
+    assert trace["metadata"]["polar_trace_count"] == 2

@@ -207,12 +207,112 @@ def _dummy_trace(tokenizer: Any) -> dict[str, Any]:
     }
 
 
+def _first_non_none(values: list[Any]) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _common_prefix_len(left: list[int], right: list[int]) -> int:
+    prefix_len = 0
+    limit = min(len(left), len(right))
+    while prefix_len < limit and left[prefix_len] == right[prefix_len]:
+        prefix_len += 1
+    return prefix_len
+
+
+def _flatten_traces_for_nemo(
+    traces: list[dict[str, Any]],
+    *,
+    outcome_reward: float | None = None,
+) -> dict[str, Any]:
+    """Flatten Polar completion traces into one NeMo multi-turn trajectory trace.
+
+    Polar's prefix-merging builder already emits a single trace for a chained
+    multi-turn session. This helper also handles per-request traces by
+    concatenating later prompt suffixes as zero-loss interstitial tokens, then
+    appending the sampled assistant tokens/logprobs for each turn.
+    """
+
+    if len(traces) == 1:
+        trace = dict(traces[0])
+        if trace.get("reward") is None and outcome_reward is not None:
+            trace["reward"] = outcome_reward
+        trace.setdefault("metadata", {})
+        trace["metadata"] = {
+            **dict(trace.get("metadata") or {}),
+            "polar_trace_count": 1,
+            "polar_trace_flattening": "single_trace",
+        }
+        return trace
+
+    first_trace = traces[0]
+    prompt_ids = list(first_trace.get("prompt_ids") or [])
+    response_ids: list[int] = []
+    response_logprobs: list[float] = []
+    loss_mask: list[int] = []
+    response_messages: list[dict[str, Any]] = []
+    finish_reason: str | None = None
+    reconstruction_warnings: list[str] = []
+
+    for trace_index, trace in enumerate(traces):
+        current_prompt_ids = list(trace.get("prompt_ids") or [])
+        if trace_index > 0 and current_prompt_ids:
+            current_stream = prompt_ids + response_ids
+            prefix_len = _common_prefix_len(current_stream, current_prompt_ids)
+            interstitial_ids = current_prompt_ids[prefix_len:]
+            if prefix_len == 0:
+                reconstruction_warnings.append(
+                    f"trace {trace_index} prompt had no token prefix overlap"
+                )
+            response_ids.extend(interstitial_ids)
+            response_logprobs.extend([0.0] * len(interstitial_ids))
+            loss_mask.extend([0] * len(interstitial_ids))
+
+        turn_response_ids = list(trace.get("response_ids") or [])
+        turn_logprobs = trace.get("response_logprobs")
+        if turn_logprobs is None:
+            turn_logprobs = []
+        turn_logprobs = [float(value) for value in turn_logprobs]
+        turn_loss_mask = [int(value) for value in (trace.get("loss_mask") or [])]
+        response_ids.extend(turn_response_ids)
+        response_logprobs.extend(turn_logprobs)
+        loss_mask.extend(turn_loss_mask)
+        response_messages.extend(list(trace.get("response_messages") or []))
+        finish_reason = trace.get("finish_reason") or finish_reason
+
+    reward = _first_non_none([trace.get("reward") for trace in reversed(traces)])
+    if reward is None:
+        reward = outcome_reward
+    return {
+        "prompt_ids": prompt_ids,
+        "response_ids": response_ids,
+        "loss_mask": loss_mask,
+        "prompt_messages": list(first_trace.get("prompt_messages") or []),
+        "response_messages": response_messages,
+        "response_logprobs": response_logprobs,
+        "reward": reward,
+        "finish_reason": finish_reason,
+        "metadata": {
+            "polar_trace_count": len(traces),
+            "polar_trace_flattening": "per_request_concat",
+            "reconstruction_warnings": reconstruction_warnings,
+        },
+    }
+
+
 def _result_trace(result: dict[str, Any], tokenizer: Any) -> tuple[dict[str, Any], bool]:
     trajectory = result.get("trajectory") or {}
     traces = trajectory.get("traces") or []
     if not traces:
         return _dummy_trace(tokenizer), False
-    trace = traces[0]
+    trace = _flatten_traces_for_nemo(
+        list(traces),
+        outcome_reward=(trajectory.get("metadata") or {})
+        .get("evaluation", {})
+        .get("outcome_reward"),
+    )
     prompt_ids = list(trace.get("prompt_ids") or [])
     response_ids = list(trace.get("response_ids") or [])
     response_logprobs = list(trace.get("response_logprobs") or [])
@@ -252,6 +352,7 @@ def build_nemo_trajectory_group(
     truncated: list[bool] = []
     completion_count = 0
     valid_count = 0
+    trace_count = 0
 
     for task_result in task_results:
         for result in task_result.get("results") or []:
@@ -286,6 +387,7 @@ def build_nemo_trajectory_group(
             total_reward.append(reward)
             truncated.append(False)
             completion_count += int((result.get("trajectory") or {}).get("metadata", {}).get("record_count") or 0)
+            trace_count += int((trace.get("metadata") or {}).get("polar_trace_count") or 1)
             valid_count += int(valid)
 
     if not message_logs:
@@ -314,6 +416,7 @@ def build_nemo_trajectory_group(
         "polar/group_sessions": float(len(message_logs)),
         "polar/trainable_samples": float(batch["loss_multiplier"].sum().item()),
         "polar/completions": float(completion_count),
+        "polar/traces": float(trace_count),
         "polar/valid_sessions": float(valid_count),
         "natural_termination_rate": 1.0,
         "truncation_rate": 0.0,

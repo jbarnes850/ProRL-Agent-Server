@@ -19,6 +19,7 @@ from nemo_polar_bridge.datasets.verifiers import portable_verifier_source
 
 
 FINAL_ANSWER_INSTRUCTION = "End your response with a line exactly: Final answer: <answer>"
+MULTI_TURN_EXECUTION_TYPES = {"multi_turn_chat_tool", "multi_step_chat_tool"}
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -38,7 +39,9 @@ def build_task_template(
     *,
     run_matrix: RunMatrixCell | None = None,
 ) -> dict[str, Any]:
-    command = _build_agent_command(args)
+    execution_type = str(getattr(args, "execution_type", "single_turn_chat") or "single_turn_chat")
+    multi_turn = execution_type in MULTI_TURN_EXECUTION_TYPES
+    command = _build_multi_turn_agent_command(args) if multi_turn else _build_agent_command(args)
     test_command = r"""cd /polar/session/workspace && python3 - <<'PY'
 import json
 from pathlib import Path
@@ -55,7 +58,10 @@ PY"""
             "{group_id}-{attempt_index}-{name}"
         ),
         "instruction": (
-            "Sample one live model completion from a NeMo Gym-shaped task row "
+            "Run a multi-turn NeMo Gym-shaped task row through live model calls "
+            "and score the final episode with the task verifier."
+            if multi_turn
+            else "Sample one live model completion from a NeMo Gym-shaped task row "
             "and score it with the task verifier."
         ),
         "timeout_seconds": args.task_timeout_seconds,
@@ -105,6 +111,7 @@ PY"""
             "purpose": "NeMo native Async GRPO with Polar live verifier dataset tasks",
             "source_schema": "NeMo Gym JSONL",
             "answer_format": getattr(args, "answer_format", "none"),
+            "execution_type": execution_type,
             "run_matrix": {} if run_matrix is None else run_matrix.to_json_dict(),
             "reward_contract": (
                 "One NeMo Gym task row is sampled N times by the current policy; "
@@ -142,6 +149,82 @@ def normalize_messages(value):
             return messages
     return [{{"role": "user", "content": str(value or "")}}]
 
+def model_request_params(responses_create_params):
+    params = {{}}
+    for key, value in responses_create_params.items():
+        if key == "input":
+            continue
+        if key in ("tools", "tool_choice") and value in (None, [], {{}}):
+            continue
+        params[key] = value
+    return params
+
+def nemo_gym_response(content, model_name, raw_response):
+    return {{
+        "id": str(raw_response.get("id") or "polar_response"),
+        "created_at": float(raw_response.get("created") or raw_response.get("created_at") or 0.0),
+        "model": str(raw_response.get("model") or model_name),
+        "object": "response",
+        "output": [
+            {{
+                "id": "polar_message_0",
+                "content": [
+                    {{
+                        "annotations": [],
+                        "text": str(content or ""),
+                        "type": "output_text",
+                    }}
+                ],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }}
+        ],
+        "parallel_tool_calls": False,
+        "tool_choice": "none",
+        "tools": [],
+    }}
+
+def resource_verify_url(task):
+    metadata = task.get("metadata") or {{}}
+    agentic = metadata.get("agentic") if isinstance(metadata, dict) else {{}}
+    if not isinstance(agentic, dict):
+        agentic = {{}}
+    return (
+        os.environ.get("POLAR_GYM_RESOURCE_VERIFY_URL")
+        or agentic.get("resource_verify_url")
+        or agentic.get("verifier_url")
+    )
+
+def verify_task(content, task, raw_response, model_name):
+    url = resource_verify_url(task)
+    if not url:
+        return verify_completion(content, task)
+    payload = {{
+        "responses_create_params": task.get("responses_create_params") or {{}},
+        "response": nemo_gym_response(content, model_name, raw_response),
+    }}
+    exp_cal_state = coerce_jsonish(str(task.get("answer") or ""))
+    if str(task.get("source_dataset") or "").casefold() == "calendar":
+        payload["exp_cal_state"] = normalize_calendar_state(exp_cal_state)
+    req = urllib.request.Request(
+        str(url),
+        data=json.dumps(payload).encode(),
+        headers={{"Content-Type": "application/json"}},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout={int(args.model_request_timeout_seconds)}) as resp:
+        verify_response = json.loads(resp.read())
+    reward = float(verify_response.get("reward", 0.0))
+    return {{
+        "passed": reward > 0.0,
+        "reward": reward,
+        "reason": "gym_resource_server_verify",
+        "normalized_completion": str(content or ""),
+        "normalized_answer": json.dumps(exp_cal_state, sort_keys=True),
+        "metadata": {{"verifier": "gym_resource_server", "resource_verify_url": str(url)}},
+    }}
+
 artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/polar/session/artifacts"))
 artifacts.mkdir(parents=True, exist_ok=True)
 workspace = Path("/polar/session/workspace")
@@ -151,7 +234,7 @@ task = json.loads(os.environ["POLAR_TASK_SPEC_JSON"])
 responses_create_params = dict(task.get("responses_create_params") or {{}})
 messages = normalize_messages(responses_create_params.get("input"))
 payload = {{
-    **{{key: value for key, value in responses_create_params.items() if key != "input"}},
+    **model_request_params(responses_create_params),
     "model": os.environ.get("POLAR_MODEL_NAME", {args.model_name!r}),
     "messages": messages,
     "max_tokens": int(os.environ.get("POLAR_MODEL_MAX_TOKENS", "{args.model_max_tokens}")),
@@ -172,11 +255,212 @@ with urllib.request.urlopen(req, timeout={int(args.model_request_timeout_seconds
     data = json.loads(resp.read())
 
 content = data["choices"][0]["message"].get("content", "")
-result = verify_completion(content, task)
+result = verify_task(
+    content,
+    task,
+    data,
+    os.environ.get("POLAR_MODEL_NAME", {args.model_name!r}),
+)
 (workspace / "model_response.txt").write_text(str(content))
 (workspace / "verifier_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
 (workspace / "dataset_task_metadata.json").write_text(json.dumps(task, indent=2, sort_keys=True))
 (artifacts / "llm_probe.json").write_text(json.dumps(data, indent=2, sort_keys=True))
+(artifacts / "verifier_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+PY"""
+
+
+def _build_multi_turn_agent_command(args: argparse.Namespace) -> str:
+    verifier_source = portable_verifier_source()
+    return f"""python3 - <<'PY'
+import json
+import os
+import urllib.request
+from pathlib import Path
+
+{verifier_source}
+
+def normalize_messages(value):
+    if isinstance(value, str):
+        return [{{"role": "user", "content": value}}]
+    if isinstance(value, list):
+        messages = []
+        for message in value:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user")
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, sort_keys=True)
+            normalized = {{"role": role, "content": content}}
+            for key in ("name", "tool_call_id"):
+                if key in message:
+                    normalized[key] = message[key]
+            messages.append(normalized)
+        if messages:
+            return messages
+    return [{{"role": "user", "content": str(value or "")}}]
+
+def model_request_params(responses_create_params):
+    params = {{}}
+    for key, value in responses_create_params.items():
+        if key == "input":
+            continue
+        if key in ("tools", "tool_choice") and value in (None, [], {{}}):
+            continue
+        params[key] = value
+    return params
+
+def nemo_gym_response(content, model_name, raw_response):
+    return {{
+        "id": str(raw_response.get("id") or "polar_response"),
+        "created_at": float(raw_response.get("created") or raw_response.get("created_at") or 0.0),
+        "model": str(raw_response.get("model") or model_name),
+        "object": "response",
+        "output": [
+            {{
+                "id": "polar_message_0",
+                "content": [
+                    {{
+                        "annotations": [],
+                        "text": str(content or ""),
+                        "type": "output_text",
+                    }}
+                ],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }}
+        ],
+        "parallel_tool_calls": False,
+        "tool_choice": "none",
+        "tools": [],
+    }}
+
+def resource_verify_url(task):
+    metadata = task.get("metadata") or {{}}
+    agentic = metadata.get("agentic") if isinstance(metadata, dict) else {{}}
+    if not isinstance(agentic, dict):
+        agentic = {{}}
+    return (
+        os.environ.get("POLAR_GYM_RESOURCE_VERIFY_URL")
+        or agentic.get("resource_verify_url")
+        or agentic.get("verifier_url")
+    )
+
+def verify_task(content, task, raw_response, model_name):
+    url = resource_verify_url(task)
+    if not url:
+        return verify_completion(content, task)
+    payload = {{
+        "responses_create_params": task.get("responses_create_params") or {{}},
+        "response": nemo_gym_response(content, model_name, raw_response),
+    }}
+    exp_cal_state = coerce_jsonish(str(task.get("answer") or ""))
+    if str(task.get("source_dataset") or "").casefold() == "calendar":
+        payload["exp_cal_state"] = normalize_calendar_state(exp_cal_state)
+    req = urllib.request.Request(
+        str(url),
+        data=json.dumps(payload).encode(),
+        headers={{"Content-Type": "application/json"}},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout={int(args.model_request_timeout_seconds)}) as resp:
+        verify_response = json.loads(resp.read())
+    reward = float(verify_response.get("reward", 0.0))
+    return {{
+        "passed": reward > 0.0,
+        "reward": reward,
+        "reason": "gym_resource_server_verify",
+        "normalized_completion": str(content or ""),
+        "normalized_answer": json.dumps(exp_cal_state, sort_keys=True),
+        "metadata": {{"verifier": "gym_resource_server", "resource_verify_url": str(url)}},
+    }}
+
+def agentic_metadata(task):
+    metadata = task.get("metadata") or {{}}
+    agentic = metadata.get("agentic") if isinstance(metadata, dict) else {{}}
+    return agentic if isinstance(agentic, dict) else {{}}
+
+def observation_for_turn(agentic, turn_index, content):
+    observations = agentic.get("tool_observations") or agentic.get("observations") or []
+    if isinstance(observations, list) and turn_index < len(observations):
+        value = observations[turn_index]
+        return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    scripted_tools = agentic.get("tools") or []
+    if scripted_tools and "<tool" in str(content).lower():
+        return json.dumps({{"status": "ok", "turn": turn_index, "content": str(content)[:200]}})
+    return None
+
+def call_model(base, payload):
+    req = urllib.request.Request(
+        base + "/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={{
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + os.environ["OPENAI_API_KEY"],
+        }},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout={int(args.model_request_timeout_seconds)}) as resp:
+        return json.loads(resp.read())
+
+artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/polar/session/artifacts"))
+artifacts.mkdir(parents=True, exist_ok=True)
+workspace = Path("/polar/session/workspace")
+workspace.mkdir(parents=True, exist_ok=True)
+
+task = json.loads(os.environ["POLAR_TASK_SPEC_JSON"])
+agentic = agentic_metadata(task)
+responses_create_params = dict(task.get("responses_create_params") or {{}})
+messages = normalize_messages(responses_create_params.get("input"))
+max_turns = int(agentic.get("max_rollout_turns") or agentic.get("max_turns") or agentic.get("max_steps") or 2)
+max_turns = max(1, max_turns)
+base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+transcript = []
+final_content = ""
+last_probe = {{}}
+
+for turn_index in range(max_turns):
+    payload = {{
+        **model_request_params(responses_create_params),
+        "model": os.environ.get("POLAR_MODEL_NAME", {args.model_name!r}),
+        "messages": messages,
+        "max_tokens": int(os.environ.get("POLAR_MODEL_MAX_TOKENS", "{args.model_max_tokens}")),
+        "temperature": float(os.environ.get("POLAR_MODEL_TEMPERATURE", "{args.model_temperature}")),
+        "top_p": float(os.environ.get("POLAR_MODEL_TOP_P", "{args.model_top_p}")),
+    }}
+    last_probe = call_model(base, payload)
+    message = last_probe["choices"][0].get("message") or {{}}
+    final_content = str(message.get("content") or "")
+    assistant_message = {{"role": "assistant", "content": final_content}}
+    if message.get("tool_calls"):
+        assistant_message["tool_calls"] = message["tool_calls"]
+    messages.append(assistant_message)
+    transcript.append({{"turn": turn_index, "role": "assistant", "content": final_content}})
+
+    observation = observation_for_turn(agentic, turn_index, final_content)
+    if observation is None or turn_index == max_turns - 1:
+        break
+    tool_message = {{
+        "role": "tool",
+        "content": observation,
+        "tool_call_id": f"polar-tool-{{turn_index}}",
+    }}
+    messages.append(tool_message)
+    transcript.append({{"turn": turn_index, "role": "tool", "content": observation}})
+
+result = verify_task(
+    final_content,
+    task,
+    last_probe,
+    os.environ.get("POLAR_MODEL_NAME", {args.model_name!r}),
+)
+(workspace / "model_response.txt").write_text(str(final_content))
+(workspace / "multi_turn_transcript.json").write_text(json.dumps(transcript, indent=2, sort_keys=True))
+(workspace / "verifier_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+(workspace / "dataset_task_metadata.json").write_text(json.dumps(task, indent=2, sort_keys=True))
+(artifacts / "llm_probe.json").write_text(json.dumps(last_probe, indent=2, sort_keys=True))
+(artifacts / "multi_turn_transcript.json").write_text(json.dumps(transcript, indent=2, sort_keys=True))
 (artifacts / "verifier_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
 PY"""
 
