@@ -8,6 +8,8 @@ WORKER_IP="${WORKER_IP:-192.168.100.11}"
 WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
+MODEL_MOUNT_HOST="${MODEL_MOUNT_HOST:-}"
+MODEL_MOUNT_CONT="${MODEL_MOUNT_CONT:-}"
 REPO_HOST="${REPO_HOST:-/home/jarrodbarnes/ProRL-Agent-Server}"
 STAMP="${1:-$(date +%Y%m%d-%H%M%S)}"
 shift || true
@@ -68,6 +70,16 @@ echo "This training run is worth doing because it will improve the go/no-go deci
 echo "run_dir=${RUN_DIR}"
 echo "image=${IMAGE}"
 echo "run_start_time=${RUN_START_TIME}"
+
+if [[ -z "${MODEL_MOUNT_HOST}" || -z "${MODEL_MOUNT_CONT}" ]]; then
+  if [[ "${MODEL_HOST}" == */hub/* ]]; then
+    MODEL_MOUNT_HOST="${MODEL_HOST%/hub/*}/hub"
+    MODEL_MOUNT_CONT="/host-hf/hub"
+  else
+    MODEL_MOUNT_HOST="${MODEL_HOST}"
+    MODEL_MOUNT_CONT="${MODEL_CONT}"
+  fi
+fi
 
 mkdir -p "${RUN_DIR}"/{data,logs,polar,ray-head,tmp,hf}
 ssh "${WORKER_SSH}" "mkdir -p '${RUN_DIR}'/{data,logs,ray-worker,tmp,hf}"
@@ -331,7 +343,7 @@ COMMON_DOCKER=(
   --ulimit memlock=-1
   --ulimit stack=67108864
   --shm-size=32g
-  -v "${MODEL_HOST%/hub/*}/hub:/host-hf/hub:ro"
+  -v "${MODEL_MOUNT_HOST}:${MODEL_MOUNT_CONT}:ro"
   -v "${RUN_DIR}/nccl.conf:/etc/nccl.conf:ro"
   -v "${REPO_HOST}:/work/ProRL-Agent-Server:ro"
   -v "${RUN_DIR}:/work"
@@ -353,7 +365,7 @@ ssh "${WORKER_SSH}" bash -s <<EOF
 set -euo pipefail
 docker run -d --name "${WORKER_CONTAINER}" \
   --gpus all --network host --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=32g \
-  -v "${MODEL_HOST%/hub/*}/hub:/host-hf/hub:ro" \
+  -v "${MODEL_MOUNT_HOST}:${MODEL_MOUNT_CONT}:ro" \
   -v "${RUN_DIR}:/work" \
   -v "${RUN_DIR}/nccl.conf:/etc/nccl.conf:ro" \
   -v "${REPO_HOST}:/work/ProRL-Agent-Server:ro" \
@@ -546,6 +558,8 @@ if config_path.exists():
     config["timing"] = timing
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
 PY
+
+python3 "${REPO_HOST}/scripts/smoke/audit_nemo_polar_run.py" "${RUN_DIR}" || true
 
 docker logs "${HEAD_CONTAINER}" --tail 160 > "${RUN_DIR}/logs/head-final.log" 2>&1 || true
 ssh "${WORKER_SSH}" "docker logs '${WORKER_CONTAINER}' --tail 160" > "${RUN_DIR}/logs/worker-final.log" 2>&1 || true
