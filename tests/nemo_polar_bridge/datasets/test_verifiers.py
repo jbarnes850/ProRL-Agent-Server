@@ -108,6 +108,96 @@ def test_calendar_gym_verifier_rejects_constraint_violation_and_think_tags() -> 
     assert think_tag.reason == "calendar_gym_think_found"
 
 
+def test_materials_tensile_numeric_verifier_scores_boundary_policy() -> None:
+    answer = (
+        '{"answer_values":{"yield_strength_mpa":{"mean":690.7,"std":3.1},'
+        '"elastic_modulus_gpa":{"mean":123.6,"std":5.9},'
+        '"ultimate_tensile_strength_mpa":{"mean":951.6,"std":9.2},'
+        '"strain_at_uts_mm_per_mm":{"mean":0.247,"std":0.02}},'
+        '"properties":["yield_strength_mpa","elastic_modulus_gpa",'
+        '"ultimate_tensile_strength_mpa","strain_at_uts_mm_per_mm"],'
+        '"max_score":80,'
+        '"boundary_policy":"lower_exclusive_upper_inclusive_interpolated_bins",'
+        '"integrity_policy_id":"ambench_in718_posthoc_public_replay_v0"}'
+    )
+    task = TaskSpec(
+        task_id="materials-1",
+        responses_create_params={"input": [{"role": "user", "content": "Predict."}]},
+        prompt="Predict.",
+        answer=answer,
+        dataset_id="materials_replay",
+        source_dataset="nist_ambench_in718_mds2_3735",
+        verifier_name="materials_tensile_numeric",
+    )
+
+    result = verify_completion(
+        'FINAL_JSON: {"prediction":{"yield_strength_mpa":693.8,'
+        '"elastic_modulus_gpa":129.5,'
+        '"ultimate_tensile_strength_mpa":960.8,'
+        '"strain_at_uts_mm_per_mm":0.267}}',
+        task,
+    )
+
+    assert result.passed is True
+    assert result.reward == 1.0
+    assert result.metadata["score_total"] == 80
+    assert result.metadata["property_scores"]["yield_strength_mpa"]["score"] == 20
+    assert result.metadata["integrity_policy_id"] == "ambench_in718_posthoc_public_replay_v0"
+
+
+def test_materials_tensile_numeric_verifier_rejects_non_numeric_fields() -> None:
+    task = TaskSpec(
+        task_id="materials-1",
+        responses_create_params={"input": [{"role": "user", "content": "Predict."}]},
+        prompt="Predict.",
+        answer='{"answer_values":{"yield_strength_mpa":{"mean":690.7,"std":3.1}}}',
+        dataset_id="materials_replay",
+        source_dataset="nist_ambench_in718_mds2_3735",
+        verifier_name="materials_tensile_numeric",
+    )
+
+    result = verify_completion(
+        'FINAL_JSON: {"prediction":{"yield_strength_mpa":"unknown"}}',
+        task,
+    )
+
+    assert result.passed is False
+    assert result.reward == 0.0
+    assert "non_numeric_field:yield_strength_mpa" in result.metadata["parse_errors"]
+
+
+def test_materials_tensile_numeric_verifier_scores_bad_prediction_fractionally() -> None:
+    task = TaskSpec(
+        task_id="materials-1",
+        responses_create_params={"input": [{"role": "user", "content": "Predict."}]},
+        prompt="Predict.",
+        answer=(
+            '{"answer_values":{"yield_strength_mpa":{"mean":690.7,"std":3.1},'
+            '"elastic_modulus_gpa":{"mean":123.6,"std":5.9},'
+            '"ultimate_tensile_strength_mpa":{"mean":951.6,"std":9.2},'
+            '"strain_at_uts_mm_per_mm":{"mean":0.247,"std":0.02}},'
+            '"properties":["yield_strength_mpa","elastic_modulus_gpa",'
+            '"ultimate_tensile_strength_mpa","strain_at_uts_mm_per_mm"],'
+            '"max_score":80}'
+        ),
+        dataset_id="materials_replay",
+        source_dataset="nist_ambench_in718_mds2_3735",
+        verifier_name="materials_tensile_numeric",
+    )
+
+    result = verify_completion(
+        'FINAL_JSON: {"prediction":{"yield_strength_mpa":950,'
+        '"elastic_modulus_gpa":200,'
+        '"ultimate_tensile_strength_mpa":1200,'
+        '"strain_at_uts_mm_per_mm":0.035}}',
+        task,
+    )
+
+    assert 0.0 < result.reward < 1.0
+    assert result.metadata["score_total"] < result.metadata["score_max"]
+    assert result.metadata["property_scores"]["yield_strength_mpa"]["score"] == 0
+
+
 def test_portable_verifier_matches_task_specific_hooks() -> None:
     namespace: dict[str, object] = {}
     exec(portable_verifier_source(), namespace)
@@ -132,6 +222,15 @@ def test_portable_verifier_matches_task_specific_hooks() -> None:
             ),
         },
     )
+    materials = verify(
+        'FINAL_JSON: {"prediction":{"yield_strength_mpa":690.7}}',
+        {
+            "source_dataset": "nist_ambench_in718_mds2_3735",
+            "verifier_name": "materials_tensile_numeric",
+            "answer": '{"answer_values":{"yield_strength_mpa":{"mean":690.7,"std":3.1}},'
+            '"properties":["yield_strength_mpa"],"max_score":20}',
+        },
+    )
 
     assert cryptarithm["passed"] is True
     assert cryptarithm["metadata"]["verifier"] == "cryptarithm_assignment"
@@ -139,3 +238,5 @@ def test_portable_verifier_matches_task_specific_hooks() -> None:
     assert matrix["metadata"]["verifier"] == "matrix_grid"
     assert calendar["passed"] is True
     assert calendar["metadata"]["verifier"] == "calendar_gym"
+    assert materials["passed"] is True
+    assert materials["metadata"]["score_total"] == 20

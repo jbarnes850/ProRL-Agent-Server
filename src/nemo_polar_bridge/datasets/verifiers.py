@@ -61,6 +61,8 @@ def verify_completion(completion: str, task: TaskSpec) -> VerifierResult:
 
     source = (task.source_dataset or "").casefold()
     verifier_name = (task.verifier_name or "").casefold()
+    if verifier_name == "materials_tensile_numeric":
+        return _verify_materials_tensile_numeric(completion, task)
     if source == "calendar" or verifier_name == "calendar_gym":
         return _verify_calendar_gym(completion, task)
     if source == "cryptarithm":
@@ -70,6 +72,133 @@ def verify_completion(completion: str, task: TaskSpec) -> VerifierResult:
     if source == "tower_of_hanoi":
         return _verify_tower_of_hanoi(completion, task)
     return _verify_exact(completion, task)
+
+
+def _verify_materials_tensile_numeric(completion: str, task: TaskSpec) -> VerifierResult:
+    expected = _coerce_jsonish(task.answer)
+    if not isinstance(expected, dict):
+        return VerifierResult(
+            passed=False,
+            reward=0.0,
+            reason="materials_missing_expected_answer",
+            normalized_completion="",
+            normalized_answer="",
+            metadata={"verifier": "materials_tensile_numeric"},
+        )
+    parsed = _extract_materials_prediction(completion)
+    if not isinstance(parsed, dict):
+        return VerifierResult(
+            passed=False,
+            reward=0.0,
+            reason="materials_prediction_parse_failed",
+            normalized_completion=str(completion or "")[:1000],
+            normalized_answer=json.dumps(_redact_materials_answer(expected), sort_keys=True),
+            metadata={"verifier": "materials_tensile_numeric"},
+        )
+
+    answer_values = expected.get("answer_values")
+    if not isinstance(answer_values, dict):
+        answer_values = expected
+    schedule = expected.get("scoring_schedule")
+    properties = expected.get("properties") or [
+        "yield_strength_mpa",
+        "elastic_modulus_gpa",
+        "ultimate_tensile_strength_mpa",
+        "strain_at_uts_mm_per_mm",
+    ]
+    prediction = parsed.get("prediction") if isinstance(parsed.get("prediction"), dict) else parsed
+    property_scores: dict[str, dict[str, Any]] = {}
+    total_score = 0
+    parse_errors: list[str] = []
+    for field in properties:
+        answer = answer_values.get(field)
+        if not isinstance(answer, dict):
+            parse_errors.append(f"missing_answer_field:{field}")
+            continue
+        try:
+            value = float(prediction[field])
+            mean = float(answer["mean"])
+            std = float(answer["std"])
+        except Exception:
+            parse_errors.append(f"non_numeric_field:{field}")
+            property_scores[field] = {"score": 0, "z": None}
+            continue
+        z = abs(value - mean) / std if std > 0 else float("inf")
+        score = _materials_score_from_z(z, schedule)
+        property_scores[field] = {
+            "prediction": value,
+            "mean": mean,
+            "std": std,
+            "z": z,
+            "score": score,
+        }
+        total_score += score
+
+    max_score = int(expected.get("max_score") or (20 * len(properties)))
+    reward = float(total_score / max_score) if max_score > 0 else 0.0
+    passed = total_score > 0 and not parse_errors
+    reason = "materials_numeric_score" if not parse_errors else "materials_numeric_parse_error"
+    return VerifierResult(
+        passed=passed,
+        reward=reward,
+        reason=reason,
+        normalized_completion=json.dumps(parsed, sort_keys=True),
+        normalized_answer=json.dumps(_redact_materials_answer(expected), sort_keys=True),
+        metadata={
+            "verifier": "materials_tensile_numeric",
+            "score_total": total_score,
+            "score_max": max_score,
+            "property_scores": property_scores,
+            "parse_errors": parse_errors,
+            "boundary_policy": expected.get("boundary_policy")
+            or "lower_exclusive_upper_inclusive_interpolated_bins",
+            "integrity_policy_id": expected.get("integrity_policy_id"),
+            "dataset_hashes": expected.get("dataset_hashes") or {},
+        },
+    )
+
+
+def _materials_score_from_z(z: float, schedule: Any) -> int:
+    epsilon = 1e-9
+    if isinstance(schedule, list):
+        for row in schedule:
+            if not isinstance(row, dict):
+                continue
+            lower = float(row.get("lower_z", row.get("lower", 0)))
+            upper_raw = row.get("upper_z", row.get("upper"))
+            upper = float("inf") if upper_raw in (None, "inf", "infinity") else float(upper_raw)
+            lower_inclusive = bool(row.get("lower_inclusive", lower == 0))
+            upper_inclusive = bool(row.get("upper_inclusive", True))
+            above_lower = z >= lower - epsilon if lower_inclusive else z > lower + epsilon
+            below_upper = z <= upper + epsilon if upper_inclusive else z < upper - epsilon
+            if above_lower and below_upper:
+                return int(row.get("points", row.get("score", 0)))
+    if z <= 1 + epsilon:
+        return 20
+    if z > 20 + epsilon:
+        return 0
+    return max(0, 21 - int(z if z == int(z) else int(z) + 1))
+
+
+def _extract_materials_prediction(completion: str) -> dict[str, Any] | None:
+    text = strip_code_fence(str(completion or "")).strip()
+    tagged = re.findall(r"FINAL_JSON\s*:\s*(\{.*\})", text, flags=re.IGNORECASE | re.DOTALL)
+    candidates = tagged or re.findall(r"\{.*\}", text, flags=re.DOTALL)
+    for candidate in reversed(candidates):
+        parsed = _coerce_jsonish(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _redact_materials_answer(answer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "properties": answer.get("properties"),
+        "max_score": answer.get("max_score"),
+        "boundary_policy": answer.get("boundary_policy"),
+        "integrity_policy_id": answer.get("integrity_policy_id"),
+        "dataset_hashes": answer.get("dataset_hashes") or {},
+    }
 
 
 def _verify_exact(completion: str, task: TaskSpec) -> VerifierResult:
@@ -413,11 +542,134 @@ def coerce_jsonish(value):
             pass
     return None
 
+def materials_score_from_z(z, schedule):
+    epsilon = 1e-9
+    if isinstance(schedule, list):
+        for row in schedule:
+            if not isinstance(row, dict):
+                continue
+            lower = float(row.get("lower_z", row.get("lower", 0)))
+            upper_raw = row.get("upper_z", row.get("upper"))
+            upper = float("inf") if upper_raw in (None, "inf", "infinity") else float(upper_raw)
+            lower_inclusive = bool(row.get("lower_inclusive", lower == 0))
+            upper_inclusive = bool(row.get("upper_inclusive", True))
+            above_lower = z >= lower - epsilon if lower_inclusive else z > lower + epsilon
+            below_upper = z <= upper + epsilon if upper_inclusive else z < upper - epsilon
+            if above_lower and below_upper:
+                return int(row.get("points", row.get("score", 0)))
+    if z <= 1 + epsilon:
+        return 20
+    if z > 20 + epsilon:
+        return 0
+    return max(0, 21 - int(z if z == int(z) else int(z) + 1))
+
+def extract_materials_prediction(completion):
+    text = strip_code_fence(str(completion or "")).strip()
+    tagged = re.findall(r"FINAL_JSON\s*:\s*(\{.*\})", text, flags=re.IGNORECASE | re.DOTALL)
+    candidates = tagged or re.findall(r"\{.*\}", text, flags=re.DOTALL)
+    for candidate in reversed(candidates):
+        parsed = coerce_jsonish(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+def redact_materials_answer(answer):
+    return {
+        "properties": answer.get("properties"),
+        "max_score": answer.get("max_score"),
+        "boundary_policy": answer.get("boundary_policy"),
+        "integrity_policy_id": answer.get("integrity_policy_id"),
+        "dataset_hashes": answer.get("dataset_hashes") or {},
+    }
+
+def verify_materials_tensile_numeric(completion, task):
+    expected = coerce_jsonish(str(task.get("answer") or ""))
+    if not isinstance(expected, dict):
+        return {
+            "passed": False,
+            "reward": 0.0,
+            "reason": "materials_missing_expected_answer",
+            "normalized_completion": "",
+            "normalized_answer": "",
+            "metadata": {"verifier": "materials_tensile_numeric"},
+        }
+    parsed = extract_materials_prediction(completion)
+    if not isinstance(parsed, dict):
+        return {
+            "passed": False,
+            "reward": 0.0,
+            "reason": "materials_prediction_parse_failed",
+            "normalized_completion": str(completion or "")[:1000],
+            "normalized_answer": json.dumps(redact_materials_answer(expected), sort_keys=True),
+            "metadata": {"verifier": "materials_tensile_numeric"},
+        }
+
+    answer_values = expected.get("answer_values")
+    if not isinstance(answer_values, dict):
+        answer_values = expected
+    schedule = expected.get("scoring_schedule")
+    properties = expected.get("properties") or [
+        "yield_strength_mpa",
+        "elastic_modulus_gpa",
+        "ultimate_tensile_strength_mpa",
+        "strain_at_uts_mm_per_mm",
+    ]
+    prediction = parsed.get("prediction") if isinstance(parsed.get("prediction"), dict) else parsed
+    property_scores = {}
+    parse_errors = []
+    total_score = 0
+    for field in properties:
+        answer = answer_values.get(field)
+        if not isinstance(answer, dict):
+            parse_errors.append("missing_answer_field:" + field)
+            continue
+        try:
+            value = float(prediction[field])
+            mean = float(answer["mean"])
+            std = float(answer["std"])
+        except Exception:
+            parse_errors.append("non_numeric_field:" + field)
+            property_scores[field] = {"score": 0, "z": None}
+            continue
+        z = abs(value - mean) / std if std > 0 else float("inf")
+        score = materials_score_from_z(z, schedule)
+        property_scores[field] = {
+            "prediction": value,
+            "mean": mean,
+            "std": std,
+            "z": z,
+            "score": score,
+        }
+        total_score += score
+
+    max_score = int(expected.get("max_score") or (20 * len(properties)))
+    reward = float(total_score / max_score) if max_score > 0 else 0.0
+    return {
+        "passed": bool(total_score > 0 and not parse_errors),
+        "reward": reward,
+        "reason": "materials_numeric_score" if not parse_errors else "materials_numeric_parse_error",
+        "normalized_completion": json.dumps(parsed, sort_keys=True),
+        "normalized_answer": json.dumps(redact_materials_answer(expected), sort_keys=True),
+        "metadata": {
+            "verifier": "materials_tensile_numeric",
+            "score_total": total_score,
+            "score_max": max_score,
+            "property_scores": property_scores,
+            "parse_errors": parse_errors,
+            "boundary_policy": expected.get("boundary_policy")
+            or "lower_exclusive_upper_inclusive_interpolated_bins",
+            "integrity_policy_id": expected.get("integrity_policy_id"),
+            "dataset_hashes": expected.get("dataset_hashes") or {},
+        },
+    }
+
 def verify_completion(completion, task):
     source = str(task.get("source_dataset") or "").casefold()
     verifier_name = str(task.get("verifier_name") or "").casefold()
     expected_text = str(task.get("answer") or "")
     candidate_raw = extract_candidate_answer(completion)
+    if verifier_name == "materials_tensile_numeric":
+        return verify_materials_tensile_numeric(completion, task)
     if source == "calendar" or verifier_name == "calendar_gym":
         exp_cal_state = normalize_calendar_state(coerce_jsonish(expected_text))
         reward, reason = grade_calendar_response(completion, exp_cal_state)

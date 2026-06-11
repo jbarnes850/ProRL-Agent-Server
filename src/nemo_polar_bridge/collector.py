@@ -445,6 +445,8 @@ def _render_attempt_payload(
         if isinstance(env, dict):
             for key, value in attempt.items():
                 env[f"POLAR_{key.upper()}"] = str(value)
+            if attempt.get("task_spec_json"):
+                env["POLAR_ORIGINAL_TASK_SPEC_JSON"] = str(attempt["task_spec_json"])
     return payload
 
 

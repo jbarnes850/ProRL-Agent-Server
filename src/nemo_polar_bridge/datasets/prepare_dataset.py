@@ -42,16 +42,6 @@ def build_task_template(
     execution_type = str(getattr(args, "execution_type", "single_turn_chat") or "single_turn_chat")
     multi_turn = execution_type in MULTI_TURN_EXECUTION_TYPES
     command = _build_multi_turn_agent_command(args) if multi_turn else _build_agent_command(args)
-    test_command = r"""cd /polar/session/workspace && python3 - <<'PY'
-import json
-from pathlib import Path
-
-result = json.loads(Path("verifier_result.json").read_text())
-if result.get("passed") is True:
-    print("PASSED live_verifier")
-else:
-    print("FAILED live_verifier")
-PY"""
     return {
         "task_id": (
             "nemo-polar-dataset-{weight_version}-{target_weight_version}-"
@@ -91,21 +81,12 @@ PY"""
         },
         "builder": {"strategy": "prefix_merging"},
         "evaluator": {
-            "strategy": "test_on_output",
+            "strategy": "verifier_result_file",
             "config": {
-                "repo_dir": "/polar/session/workspace",
-                "patch_command": "cd /polar/session/workspace && git add -A && git diff --cached --binary",
-                "test_command": test_command,
-                "test_timeout": args.test_timeout_seconds,
-                "expected_output_json": {"live_verifier": "PASSED"},
-                "exclude_patterns": [
-                    "__pycache__/**",
-                    "**/__pycache__/**",
-                    ".pytest_cache/**",
-                    "**/.pytest_cache/**",
-                ],
+                "path": "/polar/session/workspace/verifier_result.json",
+                "reward_key": "reward",
             },
-            "refresh_runtime": True,
+            "refresh_runtime": False,
         },
         "metadata": {
             "purpose": "NeMo native Async GRPO with Polar live verifier dataset tasks",
@@ -154,10 +135,29 @@ def model_request_params(responses_create_params):
     for key, value in responses_create_params.items():
         if key == "input":
             continue
+        if key == "top_k" and value not in (None, -1):
+            continue
         if key in ("tools", "tool_choice") and value in (None, [], {{}}):
             continue
         params[key] = value
     return params
+
+def load_verifier_task(payload_task):
+    candidates = [os.environ.get("POLAR_ORIGINAL_TASK_SPEC_JSON")]
+    if isinstance(payload_task, dict):
+        metadata = payload_task.get("metadata") or {{}}
+        if isinstance(metadata, dict):
+            candidates.append(metadata.get("attempt_task_spec_json"))
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("responses_create_params"), dict):
+            return parsed
+    return payload_task
 
 def nemo_gym_response(content, model_name, raw_response):
     return {{
@@ -230,7 +230,8 @@ artifacts.mkdir(parents=True, exist_ok=True)
 workspace = Path("/polar/session/workspace")
 workspace.mkdir(parents=True, exist_ok=True)
 
-task = json.loads(os.environ["POLAR_TASK_SPEC_JSON"])
+payload_task = json.loads(os.environ["POLAR_TASK_SPEC_JSON"])
+task = load_verifier_task(payload_task)
 responses_create_params = dict(task.get("responses_create_params") or {{}})
 messages = normalize_messages(responses_create_params.get("input"))
 payload = {{
@@ -305,10 +306,29 @@ def model_request_params(responses_create_params):
     for key, value in responses_create_params.items():
         if key == "input":
             continue
+        if key == "top_k" and value not in (None, -1):
+            continue
         if key in ("tools", "tool_choice") and value in (None, [], {{}}):
             continue
         params[key] = value
     return params
+
+def load_verifier_task(payload_task):
+    candidates = [os.environ.get("POLAR_ORIGINAL_TASK_SPEC_JSON")]
+    if isinstance(payload_task, dict):
+        metadata = payload_task.get("metadata") or {{}}
+        if isinstance(metadata, dict):
+            candidates.append(metadata.get("attempt_task_spec_json"))
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("responses_create_params"), dict):
+            return parsed
+    return payload_task
 
 def nemo_gym_response(content, model_name, raw_response):
     return {{
@@ -409,7 +429,8 @@ artifacts.mkdir(parents=True, exist_ok=True)
 workspace = Path("/polar/session/workspace")
 workspace.mkdir(parents=True, exist_ok=True)
 
-task = json.loads(os.environ["POLAR_TASK_SPEC_JSON"])
+payload_task = json.loads(os.environ["POLAR_TASK_SPEC_JSON"])
+task = load_verifier_task(payload_task)
 agentic = agentic_metadata(task)
 responses_create_params = dict(task.get("responses_create_params") or {{}})
 messages = normalize_messages(responses_create_params.get("input"))
@@ -639,10 +660,12 @@ def main() -> None:
                 "split": args.split,
                 "limit": args.limit,
                 "scan_rows": args.scan_rows,
+                "local_jsonl": args.local_jsonl,
                 "source_dataset_filter": args.source_dataset,
                 "canonical_schema": "nemo_gym_jsonl",
                 "selection_mode": "group_cycle",
                 "answer_format": args.answer_format,
+                "provenance": _summarize_task_provenance(tasks),
             },
             "image": args.image,
             "model": {"name": args.model_name, "path": args.model_path},
@@ -724,6 +747,27 @@ def main() -> None:
             """
         ).strip()
     )
+
+
+def _summarize_task_provenance(tasks: list[TaskSpec]) -> dict[str, Any]:
+    hashes: dict[str, Any] = {}
+    policy_ids: set[str] = set()
+    source_datasets: set[str] = set()
+    for task in tasks:
+        if task.source_dataset:
+            source_datasets.add(task.source_dataset)
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        policy_id = metadata.get("integrity_policy_id") or metadata.get("benchmark_integrity_policy_id")
+        if policy_id:
+            policy_ids.add(str(policy_id))
+        task_hashes = metadata.get("dataset_hashes") or metadata.get("provenance_hashes")
+        if isinstance(task_hashes, dict):
+            hashes.update(task_hashes)
+    return {
+        "source_datasets": sorted(source_datasets),
+        "benchmark_integrity_policy_ids": sorted(policy_ids),
+        "dataset_hashes": hashes,
+    }
 
 
 if __name__ == "__main__":

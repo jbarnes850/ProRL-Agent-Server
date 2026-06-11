@@ -77,6 +77,7 @@ def default_evaluator_registry() -> StrategyRegistry:
         SessionCompletedEvaluator,
         SwebenchHarnessEvaluator,
         TestOnOutputEvaluator,
+        VerifierResultFileEvaluator,
     )
 
     registry: StrategyRegistry[BaseTrajectoryEvaluator] = StrategyRegistry(BaseTrajectoryEvaluator)
@@ -84,5 +85,5 @@ def default_evaluator_registry() -> StrategyRegistry:
     registry.register("session_completed", SessionCompletedEvaluator)
     registry.register("swebench_harness", SwebenchHarnessEvaluator)
     registry.register("test_on_output", TestOnOutputEvaluator)
+    registry.register("verifier_result_file", VerifierResultFileEvaluator)
     return registry
-

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from nemo_polar_bridge.collector import (
     _flatten_traces_for_nemo,
+    _render_attempt_payload,
     env_flag,
     env_int,
     normalize_openai_base_url,
@@ -98,6 +100,27 @@ def test_legacy_attempt_matrix_cycles_per_generation() -> None:
         group_id=4,
         num_generations=3,
     ) == [{"name": "pass"}, {"name": "fail"}, {"name": "pass"}]
+
+
+def test_render_attempt_payload_exports_original_task_spec_env() -> None:
+    task_spec = {
+        "task_id": "materials-1",
+        "responses_create_params": {"input": "Predict."},
+        "answer": '{"answer_values":{}}',
+        "verifier_name": "materials_tensile_numeric",
+    }
+    template = {"runtime": {"env": {}}, "metadata": {}, "task_id": "{task_id}"}
+
+    payload = _render_attempt_payload(
+        template,
+        context={"task_id": "group-task"},
+        num_samples=1,
+        attempt={"name": "attempt", "task_spec_json": json.dumps(task_spec)},
+    )
+
+    env = payload["runtime"]["env"]
+    assert json.loads(env["POLAR_ORIGINAL_TASK_SPEC_JSON"]) == task_spec
+    assert payload["metadata"]["attempt_task_spec_json"] == json.dumps(task_spec)
 
 
 def test_flatten_traces_preserves_two_turn_assistant_tokens_and_masks() -> None:

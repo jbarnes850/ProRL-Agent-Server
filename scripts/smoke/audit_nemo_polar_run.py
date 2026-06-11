@@ -207,19 +207,22 @@ def audit(run_dir: Path) -> dict[str, Any]:
         "async_grpo_complete": "Async GRPO training complete" in log_text,
     }
     docker_exit_code = _read_exit_code(run_dir)
+    required_evidence = [
+        "polar_rollout",
+        "tokens_logprobs_masks",
+        "trainer_prev_logprobs",
+        "replay_add",
+        "replay_sample",
+        "policy_update",
+        "weight_sync",
+        "async_grpo_complete",
+    ]
+    generation = config.get("generation") if isinstance(config, dict) else {}
+    vllm_runtime = generation.get("vllm_runtime") if isinstance(generation, dict) else {}
+    if isinstance(vllm_runtime, dict) and str(vllm_runtime.get("precision", "")).casefold() == "fp8":
+        required_evidence.append("fp8_vllm_precision")
     status = "passed" if docker_exit_code == 0 and all(
-        bool(evidence[key])
-        for key in (
-            "fp8_vllm_precision",
-            "polar_rollout",
-            "tokens_logprobs_masks",
-            "trainer_prev_logprobs",
-            "replay_add",
-            "replay_sample",
-            "policy_update",
-            "weight_sync",
-            "async_grpo_complete",
-        )
+        bool(evidence[key]) for key in required_evidence
     ) else "failed"
     summary = {
         "status": status,
@@ -227,6 +230,7 @@ def audit(run_dir: Path) -> dict[str, Any]:
         "docker_exec_exit_code": docker_exit_code,
         "config": config,
         "evidence": evidence,
+        "required_evidence": required_evidence,
         "steps": steps,
         "train_data_audit": train_data,
     }

@@ -8,6 +8,7 @@ from nemo_polar_bridge.datasets.prepare_dataset import (
     apply_answer_format,
     build_attempt_matrix,
     build_task_template,
+    _summarize_task_provenance,
 )
 from nemo_polar_bridge.datasets.run_matrix import RunMatrixCell
 
@@ -67,11 +68,33 @@ def test_build_task_template_uses_live_verifier_evaluator() -> None:
 
     template = build_task_template(args)
 
-    assert template["evaluator"]["strategy"] == "test_on_output"
-    assert template["evaluator"]["config"]["expected_output_json"] == {"live_verifier": "PASSED"}
+    assert template["evaluator"]["strategy"] == "verifier_result_file"
+    assert template["evaluator"]["config"]["path"] == "/polar/session/workspace/verifier_result.json"
+    assert template["evaluator"]["config"]["reward_key"] == "reward"
     command = template["agent"]["custom_shell"]["command"]
     assert "responses_create_params" in command
     assert "verify_completion" in command
+    assert "POLAR_ORIGINAL_TASK_SPEC_JSON" in command
+    assert "load_verifier_task" in command
+
+
+def test_task_template_strips_unsupported_top_k_from_model_request() -> None:
+    args = SimpleNamespace(
+        runtime_image="polar-spark-calculator:latest",
+        task_timeout_seconds=240.0,
+        model_name="Qwen/Qwen3-4B-Instruct-2507",
+        test_timeout_seconds=60.0,
+        model_max_tokens=32,
+        model_temperature=0.6,
+        model_top_p=0.95,
+        model_request_timeout_seconds=120.0,
+        answer_format="none",
+        execution_type="single_turn_chat",
+    )
+
+    command = build_task_template(args)["agent"]["custom_shell"]["command"]
+
+    assert 'if key == "top_k" and value not in (None, -1):' in command
 
 
 def test_build_task_template_supports_multi_turn_chat_tool_execution() -> None:
@@ -136,3 +159,26 @@ def test_apply_final_answer_format_appends_to_string_input_once() -> None:
 
     assert formatted.responses_create_params["input"].endswith(FINAL_ANSWER_INSTRUCTION)
     assert formatted_again.responses_create_params["input"].count(FINAL_ANSWER_INSTRUCTION) == 1
+
+
+def test_summarize_task_provenance_carries_materials_hashes() -> None:
+    task = TaskSpec(
+        task_id="materials-1",
+        responses_create_params={"input": "Predict."},
+        prompt="Predict.",
+        answer="{}",
+        dataset_id="materials_replay",
+        source_dataset="nist_ambench_in718_mds2_3735",
+        metadata={
+            "integrity_policy_id": "ambench_in718_posthoc_public_replay_v0",
+            "dataset_hashes": {"readme.pdf": "abc123"},
+        },
+    )
+
+    summary = _summarize_task_provenance([task])
+
+    assert summary["source_datasets"] == ["nist_ambench_in718_mds2_3735"]
+    assert summary["benchmark_integrity_policy_ids"] == [
+        "ambench_in718_posthoc_public_replay_v0"
+    ]
+    assert summary["dataset_hashes"] == {"readme.pdf": "abc123"}
