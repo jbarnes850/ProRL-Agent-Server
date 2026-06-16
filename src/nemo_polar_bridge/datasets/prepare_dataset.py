@@ -18,7 +18,10 @@ from nemo_polar_bridge.datasets.run_matrix import RunMatrixCell, build_run_matri
 from nemo_polar_bridge.datasets.verifiers import portable_verifier_source
 
 
-FINAL_ANSWER_INSTRUCTION = "End your response with a line exactly: Final answer: <answer>"
+FINAL_ANSWER_INSTRUCTION = (
+    "On the last line of your response, write 'Final answer:' followed by your "
+    "final result and nothing else."
+)
 MULTI_TURN_EXECUTION_TYPES = {"multi_turn_chat_tool", "multi_step_chat_tool"}
 
 

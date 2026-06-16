@@ -145,6 +145,14 @@ def test_apply_final_answer_format_appends_to_last_user_message() -> None:
     assert formatted.metadata["answer_format"] == "final_answer"
 
 
+def test_final_answer_instruction_has_no_literal_placeholder() -> None:
+    # A literal "<answer>" placeholder gets copied verbatim by small models,
+    # producing "Final answer: <answer>" -> zero reward. The instruction must
+    # direct the model to write its actual result after "Final answer:".
+    assert "<answer>" not in FINAL_ANSWER_INSTRUCTION
+    assert "final answer:" in FINAL_ANSWER_INSTRUCTION.lower()
+
+
 def test_apply_final_answer_format_appends_to_string_input_once() -> None:
     task = TaskSpec(
         task_id="task-1",

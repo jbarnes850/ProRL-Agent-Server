@@ -1,0 +1,8 @@
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 47 + 38."}]}, "answer": "85", "metadata": {"source_dataset": "basic_arithmetic"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 1234 + 5678 - 3456."}]}, "answer": "3456", "metadata": {"source_dataset": "basic_arithmetic"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 347 * 28."}]}, "answer": "9716", "metadata": {"source_dataset": "basic_arithmetic"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 583 * 47."}]}, "answer": "27401", "metadata": {"source_dataset": "basic_arithmetic"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 234 * 56."}]}, "answer": "13104", "metadata": {"source_dataset": "basic_arithmetic"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 729 * 36."}]}, "answer": "26244", "metadata": {"source_dataset": "basic_arithmetic"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 456 * 23 + 789."}]}, "answer": "11277", "metadata": {"source_dataset": "basic_arithmetic"}}
+{"responses_create_params": {"input": [{"role": "user", "content": "Calculate 6845 * 73."}]}, "answer": "499685", "metadata": {"source_dataset": "basic_arithmetic"}}

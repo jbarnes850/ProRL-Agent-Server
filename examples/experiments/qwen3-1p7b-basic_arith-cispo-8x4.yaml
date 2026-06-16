@@ -1,0 +1,36 @@
+# First beyond-GRPO ablation: one axis changed off the proven GRPO baseline.
+# CISPO + length-debiased token-level loss, clip (1,4) = Laguna parity.
+# Requires a NeMo RL image >= the CISPO ref (rebuilt to c236061b).
+#
+# Validate (no GPU) inside the image, then launch:
+#   python -m nemo_polar_bridge.experiment.cli launch \
+#     examples/experiments/qwen3-1p7b-basic_arith-cispo-8x4.yaml \
+#     --store runs/lineage --out runs/<id>
+id: qwen3-1p7b-basic_arith-cispo-8x4
+parent: qwen3-1p7b-basic_arith-grpo-8x4
+
+model:
+  name: Qwen/Qwen3-1.7B
+  snapshot: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  max_total_sequence_length: 4096
+
+dataset:
+  family: nemo_gym
+  source: nvidia/Nemotron-RL-ReasoningGym-v1
+  subset: basic_arithmetic
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: cispo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 2
