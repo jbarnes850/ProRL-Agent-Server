@@ -1,0 +1,37 @@
+# Experiment-as-code re-expression of the proven two-Spark Async GRPO run
+# (lab skill: references/current-state.md, Qwen3-1.7B basic_arithmetic baseline).
+#
+# Compile + validate (no GPU) with:
+#   uv run --with omegaconf --with hydra-core \
+#     python scripts/experiment/validate_against_nemo_loader.py \
+#     examples/experiments/qwen3-1p7b-basic_arith-grpo-8x4.yaml
+#
+# This is the GRPO baseline. The first beyond-GRPO ablation is a one-axis change:
+# set `parent: qwen3-1p7b-basic_arith-grpo-8x4` and `algorithm.name: cispo`.
+id: qwen3-1p7b-basic_arith-grpo-8x4
+
+model:
+  name: Qwen/Qwen3-1.7B
+  snapshot: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  max_total_sequence_length: 4096
+
+dataset:
+  family: nemo_gym
+  source: nvidia/Nemotron-RL-ReasoningGym-v1
+  subset: basic_arithmetic
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: grpo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 2

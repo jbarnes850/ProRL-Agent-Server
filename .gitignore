@@ -100,6 +100,8 @@ wandb/
 checkpoints/
 models/
 experiments/
+# but keep curated experiment-as-code example specs (committed by design)
+!examples/experiments/
 rollout_results/
 outputs/
 local/

@@ -62,3 +62,41 @@ policy training, and weight-sync pause/resume around Polar generation.
 Do not restore the old Polar -> NeMo TransferQueue patch path as the scalable
 async engine. The approved path is NeMo native Async GRPO plus the minimal
 `nemo_polar_bridge` external collector feeding NeMo's native `ReplayBuffer`.
+
+## Experiment-as-Code Engine (`nemo_polar_bridge.experiment`)
+
+A declarative experiment-as-code layer over the approved Async GRPO + Polar
+path. An `ExperimentSpec` (YAML) compiles to the NeMo base config plus dotted
+overrides, registers as a content-addressed lineage asset, and emits a runnable
+launch command. The whole layer is no-GPU and reuses the proven smoke launcher
+rather than reimplementing orchestration.
+
+    python -m nemo_polar_bridge.experiment.cli launch \
+      examples/experiments/qwen3-1p7b-basic_arith-grpo-8x4.yaml \
+      --store runs/lineage --out runs/<id>
+
+- `experiment/spec.py` — `ExperimentSpec` (model/dataset/verifier/algorithm/
+  async/rollout/topology/precision).
+- `experiment/compile.py` — `compile_spec` -> `(base_config, dotted overrides)`.
+  The algorithm axis is config-only on the GRPO family's single `ClippedPGLossFn`:
+  `grpo` (baseline), `cispo` (clip `(1,4)` = Laguna parity), `drgrpo`
+  (`grpo.normalize_rewards=false`, keeps the leave-one-out baseline), `gspo`,
+  `dapo`, `rloo`; advantage via `grpo.adv_estimator.name`. Static guards: async
+  excludes DAPO data-side features; `gdpo` needs a multi-reward verifier;
+  `drgrpo` requires the `grpo` advantage. Baseline uses standard (unweighted)
+  RLOO, not Laguna's length-weighted LOO (documented limitation).
+- `experiment/lineage.py` — spec digest (identity) + injective compiled digest
+  (what ran) + bidirectional DAG; forward artifact binding by content hash.
+- `experiment/runtime.py` — `RuntimeProfile.two_spark()` + `compose_launch`. Spec
+  knobs map to the smoke env contract; algorithm-axis keys the smoke does not set
+  become positional `EXTRA_OVERRIDES`. Invariant: the GRPO baseline composes to
+  zero positional extras.
+- `scripts/experiment/validate_against_nemo_loader.py` — no-GPU dry-run gate:
+  applies compiled overrides through NeMo RL's real `load_config` /
+  `parse_hydra_overrides` (`struct=True`). Run inside the pinned image before any
+  Spark launch to catch clone-vs-image key drift.
+
+Key mappings were verified against NeMo RL `c236061b`; re-verify inside the
+pinned image before a live run. The engine never spends GPU; the emitted
+`launch.sh` is gated by the staged-validation ladder. Green baseline:
+`PYTHONPATH=src .venv/bin/python -m pytest tests/nemo_polar_bridge/ -q`.

@@ -1,0 +1,85 @@
+"""Runtime profile + launch composer.
+
+The composer reuses the proven smoke launcher (the skill's "pass overrides
+through existing config surfaces" rule): spec experiment knobs map to the smoke
+env-var contract; the algorithm-axis keys the smoke does not know become
+positional EXTRA_OVERRIDES. The GRPO baseline must compose to env-only with no
+positional extras (the smoke reproduces it exactly).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from nemo_polar_bridge.experiment import ExperimentSpec
+from nemo_polar_bridge.experiment.runtime import RuntimeProfile, compose_launch
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PROVEN_RUN_YAML = (
+    REPO_ROOT / "examples" / "experiments" / "qwen3-1p7b-basic_arith-grpo-8x4.yaml"
+)
+
+
+def grpo_spec() -> ExperimentSpec:
+    return ExperimentSpec.from_yaml(PROVEN_RUN_YAML)
+
+
+def ablation(name: str) -> ExperimentSpec:
+    spec = ExperimentSpec.from_yaml(PROVEN_RUN_YAML)
+    spec.id = f"qwen3-1p7b-basic_arith-{name}-8x4"
+    spec.parent = "qwen3-1p7b-basic_arith-grpo-8x4"
+    spec.algorithm.name = name
+    return spec
+
+
+def test_grpo_baseline_composes_to_env_only_no_positional_extras():
+    plan = compose_launch(grpo_spec(), RuntimeProfile.two_spark())
+    assert plan.env["NEMO_GRPO_NUM_PROMPTS_PER_STEP"] == "8"
+    assert plan.env["NEMO_GRPO_NUM_GENERATIONS_PER_PROMPT"] == "4"
+    assert plan.env["NEMO_GRPO_MAX_NUM_STEPS"] == "2"
+    assert plan.env["NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS"] == "1"
+    assert plan.env["POLAR_MODEL_NAME"] == "Qwen/Qwen3-1.7B"
+    assert plan.env["POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH"] == "4096"
+    assert plan.env["POLAR_DATASET_FAMILY"] == "nemo_gym"
+    assert plan.env["POLAR_VERIFIER_TYPE"] == "exact_answer"
+    assert plan.env["POLAR_EXECUTION_TYPE"] == "single_turn_chat"
+    assert plan.env["POLAR_SOURCE_DATASETS"] == "basic_arithmetic"
+    # the smoke reproduces the GRPO baseline exactly -> no positional overrides
+    assert plan.extra_overrides == []
+    assert plan.argv()[:3] == ["bash", plan.smoke_script, "qwen3-1p7b-basic_arith-grpo-8x4"]
+
+
+def test_model_host_and_cont_built_from_profile_and_spec():
+    plan = compose_launch(grpo_spec(), RuntimeProfile.two_spark())
+    snap = "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
+    assert plan.env["MODEL_HOST"] == (
+        f"/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/{snap}"
+    )
+    assert plan.env["MODEL_CONT"] == (
+        f"/host-hf/hub/models--Qwen--Qwen3-1.7B/snapshots/{snap}"
+    )
+
+
+def test_cispo_ablation_emits_algorithm_axis_as_positional_overrides():
+    plan = compose_launch(ablation("cispo"), RuntimeProfile.two_spark())
+    assert "loss_fn.use_cispo=true" in plan.extra_overrides
+    assert "loss_fn.token_level_loss=true" in plan.extra_overrides
+    assert "loss_fn.ratio_clip_min=1.0" in plan.extra_overrides
+    assert "loss_fn.ratio_clip_max=4.0" in plan.extra_overrides
+    # the async + rollout env contract is unchanged by the algorithm swap
+    assert plan.env["NEMO_GRPO_NUM_PROMPTS_PER_STEP"] == "8"
+    # algorithm keys live only as positional overrides, never in env
+    assert not any("cispo" in v.lower() for v in plan.env.values())
+
+
+def test_drgrpo_ablation_emits_single_extra_override():
+    plan = compose_launch(ablation("drgrpo"), RuntimeProfile.two_spark())
+    assert plan.extra_overrides == ["grpo.normalize_rewards=false"]
+
+
+def test_shell_rendering_is_runnable_and_self_describing():
+    plan = compose_launch(ablation("cispo"), RuntimeProfile.two_spark())
+    shell = plan.shell()
+    assert "NEMO_GRPO_NUM_PROMPTS_PER_STEP=8" in shell
+    assert f"bash {plan.smoke_script}" in shell
+    assert "loss_fn.use_cispo=true" in shell
