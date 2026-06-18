@@ -65,6 +65,74 @@ POLAR_GATEWAY_MAX_RUN_WORKERS="${POLAR_GATEWAY_MAX_RUN_WORKERS:-${NEMO_POLAR_GRO
 POLAR_GATEWAY_MAX_POSTRUN_WORKERS="${POLAR_GATEWAY_MAX_POSTRUN_WORKERS:-${NEMO_POLAR_GROUP_WORKERS}}"
 POLAR_MODEL_REQUEST_TIMEOUT_SECONDS="${POLAR_MODEL_REQUEST_TIMEOUT_SECONDS:-180}"
 POLAR_TASK_TIMEOUT_SECONDS="${POLAR_TASK_TIMEOUT_SECONDS:-300}"
+CLEANUP_DONE=0
+
+cleanup_smoke_resources() {
+  local original_status=$?
+  local cleanup_status=0
+  local pids
+
+  if [[ "${CLEANUP_DONE}" -eq 1 ]]; then
+    return "${original_status}"
+  fi
+  CLEANUP_DONE=1
+
+  set +e
+  mkdir -p "${RUN_DIR}/logs" "${RUN_DIR}/polar"
+  {
+    echo "cleanup_start_time=$(date -Is)"
+
+    for pid_file in "${RUN_DIR}/polar/rollout.pid" "${RUN_DIR}/polar/gateway.pid"; do
+      if [[ -s "${pid_file}" ]]; then
+        pid="$(cat "${pid_file}")"
+        if [[ -n "${pid}" ]]; then
+          kill "${pid}" >/dev/null 2>&1 || true
+          sleep 1
+          kill -0 "${pid}" >/dev/null 2>&1 && kill -9 "${pid}" >/dev/null 2>&1 || true
+        fi
+      fi
+    done
+
+    for port in "${POLAR_ROLLOUT_PORT}" "${POLAR_GATEWAY_PORT}"; do
+      pids=$(lsof -ti "tcp:${port}" 2>/dev/null || true)
+      if [[ -n "${pids}" ]]; then
+        kill ${pids} >/dev/null 2>&1 || true
+        sleep 1
+        pids=$(lsof -ti "tcp:${port}" 2>/dev/null || true)
+        if [[ -n "${pids}" ]]; then
+          kill -9 ${pids} >/dev/null 2>&1 || true
+        fi
+      fi
+    done
+
+    docker rm -f "${HEAD_CONTAINER}" >/dev/null 2>&1 || true
+    ssh "${WORKER_SSH}" "docker rm -f '${WORKER_CONTAINER}' >/dev/null 2>&1 || true"
+    ssh "${WORKER_SSH}" "docker rm -f vllm-polar-qwen06 >/dev/null 2>&1 || true"
+
+    if docker ps -a --format '{{.Names}}' | grep -Fx "${HEAD_CONTAINER}" >/dev/null; then
+      echo "cleanup_leftover_container=${HEAD_CONTAINER}"
+      cleanup_status=1
+    fi
+    if ssh "${WORKER_SSH}" "docker ps -a --format '{{.Names}}' | grep -Fx '${WORKER_CONTAINER}' >/dev/null"; then
+      echo "cleanup_leftover_container=${WORKER_CONTAINER}"
+      cleanup_status=1
+    fi
+    for port in "${POLAR_ROLLOUT_PORT}" "${POLAR_GATEWAY_PORT}"; do
+      if lsof -ti "tcp:${port}" >/dev/null 2>&1; then
+        echo "cleanup_leftover_port=${port}"
+        cleanup_status=1
+      fi
+    done
+
+    echo "cleanup_exit_code=${cleanup_status}"
+    echo "cleanup_end_time=$(date -Is)"
+  } >> "${RUN_DIR}/logs/cleanup.log" 2>&1
+
+  if [[ "${original_status}" -ne 0 ]]; then
+    return "${original_status}"
+  fi
+  return "${cleanup_status}"
+}
 
 echo "This training run is worth doing because it will improve the go/no-go decision for Jarrod's two-Spark small-model agentic RL lab as measured by live NeMo Async GRPO consuming non-forced Polar rollouts from a real agentic dataset with valid tokens, logprobs, masks, grouped rewards, replay-buffer sampling, and weight sync, producing a run manifest and next-ablation decision."
 echo "run_dir=${RUN_DIR}"
@@ -83,6 +151,7 @@ fi
 
 mkdir -p "${RUN_DIR}"/{data,logs,polar,ray-head,tmp,hf}
 ssh "${WORKER_SSH}" "mkdir -p '${RUN_DIR}'/{data,logs,ray-worker,tmp,hf}"
+trap cleanup_smoke_resources EXIT
 
 rsync -az --delete \
   --exclude ".git" \
@@ -583,6 +652,11 @@ for pattern in \
     ok=0
   fi
 done
+
+if ! cleanup_smoke_resources; then
+  echo "cleanup_failed=1" | tee -a "${RUN_DIR}/logs/exit-code.log"
+  ok=0
+fi
 
 if [[ "${code}" -ne 0 || "${ok}" -ne 1 ]]; then
   echo "FAILED ${RUN_DIR}" | tee -a "${RUN_DIR}/logs/exit-code.log"
