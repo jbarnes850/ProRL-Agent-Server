@@ -116,13 +116,20 @@ slime/
 Megatron-LM/
 glm/
 
-# Generated documentation
-docs/
+# Generated documentation, except the goals/ riders and results docs a blog
+# post's claims are sourced from -- those ship with the repo so every claim
+# has a tracked artifact behind it (P5.4).
+docs/*
+!docs/goals/
 /site
 
 # Dashboard frontend build artifacts
 web/node_modules/
 web/dist/
 
-# Experiment-as-code lineage/launch output (regeneratable via experiment.cli launch)
+# Experiment-as-code lineage/launch output (regeneratable via experiment.cli
+# launch). Includes each run's evidence/ (validation_summary.json,
+# metrics.jsonl, run_timing.json, train_data_audit.json) a blog post's
+# throughput numbers are sourced from -- kept locally available (see
+# scripts/smoke/archive_run_evidence.sh) but not committed to git (P5.4).
 runs/
