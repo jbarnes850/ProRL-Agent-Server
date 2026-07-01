@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NEMO_RL_REF="${NEMO_RL_REF:-37526dfac0a80b7032659a3ea030e0a9f69f99c6}"
+# See the matching comment in run_nemo_polar_external_collector_spark_smoke.sh:
+# c236061b is the proven, currently-deployed revision; the prior default
+# predates CISPO's use_cispo config key and silently produces a Hydra
+# struct error for any cispo-algorithm spec that relies on this default.
+NEMO_RL_REF="${NEMO_RL_REF:-c236061b250e97638722292ab8a54d5eb47ae00f}"
 IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
 WORKER_IP="${WORKER_IP:-192.168.100.11}"

@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NEMO_RL_REF="${NEMO_RL_REF:-37526dfac0a80b7032659a3ea030e0a9f69f99c6}"
+# c236061b is the proven, currently-deployed NeMo RL revision (matches
+# preflight_spark.sh's own default). The prior default (37526dfa) predates
+# CISPO's use_cispo config key entirely -- any spec that omits an explicit
+# IMAGE/NEMO_RL_REF override (i.e. relies on RuntimeProfile.image/
+# nemo_rl_ref's documented None-falls-back-to-this-default behavior) and
+# uses the cispo algorithm axis would silently run against the stale image
+# and fail with `Could not override 'loss_fn.use_cispo': Key 'use_cispo'
+# is not in struct` -- confirmed live: `docker run --rm
+# local/nemo-rl-main-cu132:37526dfa grep -rn use_cispo /opt/nemo-rl/` has
+# zero matches, while the c236061b image has use_cispo in its base recipe.
+NEMO_RL_REF="${NEMO_RL_REF:-c236061b250e97638722292ab8a54d5eb47ae00f}"
 IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
 WORKER_IP="${WORKER_IP:-192.168.100.11}"
@@ -9,6 +19,31 @@ WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
 HEAD_HOSTNAME="${HEAD_HOSTNAME:-spark-f7e2}"
 WORKER_HOSTNAME="${WORKER_HOSTNAME:-spark-cfd0}"
 NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp1s0f1np1}"
+# Weight-sync transport. Every run through this script prior to 2026-07-01
+# forced NCCL onto plain TCP sockets (NCCL_IB_DISABLE=1, NCCL_NET=Socket,
+# NCCL_NET_PLUGIN=none) even though both hosts' enp1s0f1np1 NIC has an
+# active, working RoCEv2 link (`rdma link show`: rocep1s0f1 ACTIVE
+# LINK_UP) -- confirmed by grepping the weight-sync NCCL communicator
+# (nranks=2, the exact train<->inference group) out of an archived
+# validation log: "NCCL INFO Using network Socket" and "GPU Direct RDMA
+# Disabled for HCA 0 'enp1s0f1np1'". Nothing disabled it for a documented
+# reason; it was inherited from an earlier debugging session and never
+# revisited. Default here preserves that proven Socket-only behavior;
+# set NCCL_TRANSPORT=roce to route the weight-sync broadcast over RDMA
+# instead. GID index 3 (RoCEv2, IPv4-mapped) confirmed via `show_gids` on
+# both hosts against device rocep1s0f1.
+NCCL_TRANSPORT="${NCCL_TRANSPORT:-socket}"
+NCCL_IB_HCA="${NCCL_IB_HCA:-rocep1s0f1}"
+NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
+if [[ "${NCCL_TRANSPORT}" == "roce" ]]; then
+  NCCL_IB_DISABLE_VALUE="0"
+  NCCL_NET_VALUE="IB"
+  NCCL_NET_PLUGIN_VALUE=""
+else
+  NCCL_IB_DISABLE_VALUE="1"
+  NCCL_NET_VALUE="Socket"
+  NCCL_NET_PLUGIN_VALUE="none"
+fi
 # Ray's default object-store reservation is ~30% of node memory
 # (DEFAULT_OBJECT_STORE_MEMORY_PROPORTION), uncapped. On DGX Spark's unified
 # CPU+GPU memory pool that reservation competes directly with model weights
@@ -176,11 +211,13 @@ rsync -az --delete \
   "${REPO_HOST}/" "${WORKER_SSH}:${REPO_HOST}/"
 
 cat > "${RUN_DIR}/nccl.conf" <<EOF
-NCCL_IB_DISABLE=1
+NCCL_IB_DISABLE=${NCCL_IB_DISABLE_VALUE}
 NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
 NCCL_SOCKET_FAMILY=AF_INET
-NCCL_NET=Socket
-NCCL_NET_PLUGIN=none
+NCCL_NET=${NCCL_NET_VALUE}
+NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN_VALUE}
+NCCL_IB_HCA=${NCCL_IB_HCA}
+NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}
 NCCL_DEBUG=INFO
 NCCL_DEBUG_SUBSYS=INIT,NET,ENV
 EOF
@@ -409,11 +446,13 @@ curl -sf "http://${HEAD_IP}:${POLAR_ROLLOUT_PORT}/nodes" | tee "${RUN_DIR}/logs/
 COMMON_ENV=(
   -e NVIDIA_VISIBLE_DEVICES=all
   -e CUDA_VISIBLE_DEVICES=0
-  -e NCCL_IB_DISABLE=1
+  -e NCCL_IB_DISABLE=${NCCL_IB_DISABLE_VALUE}
   -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
   -e NCCL_SOCKET_FAMILY=AF_INET
-  -e NCCL_NET=Socket
-  -e NCCL_NET_PLUGIN=none
+  -e NCCL_NET=${NCCL_NET_VALUE}
+  -e NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN_VALUE}
+  -e NCCL_IB_HCA=${NCCL_IB_HCA}
+  -e NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}
   -e NCCL_DEBUG=INFO
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
@@ -441,6 +480,19 @@ COMMON_DOCKER=(
   --ulimit memlock=-1
   --ulimit stack=67108864
   --shm-size=32g
+  --cap-add=IPC_LOCK
+  # A directory bind-mount of /dev/infiniband makes the device nodes visible
+  # in the container's filesystem (ls succeeds) but does NOT update Docker's
+  # device cgroup whitelist, which gates the actual open()/ioctl() syscalls
+  # libibverbs needs -- confirmed live: ibv_devinfo failed with "Failed to
+  # open device" on all 4 RoCE devices under a plain volume mount, and
+  # succeeded immediately once each device file was passed via its own
+  # --device flag instead.
+  --device=/dev/infiniband/uverbs0
+  --device=/dev/infiniband/uverbs1
+  --device=/dev/infiniband/uverbs2
+  --device=/dev/infiniband/uverbs3
+  --device=/dev/infiniband/rdma_cm
   -v "${MODEL_MOUNT_HOST}:${MODEL_MOUNT_CONT}:ro"
   -v "${RUN_DIR}/nccl.conf:/etc/nccl.conf:ro"
   -v "${REPO_HOST}:/work/ProRL-Agent-Server:ro"
@@ -463,17 +515,23 @@ ssh "${WORKER_SSH}" bash -s <<EOF
 set -euo pipefail
 docker run -d --name "${WORKER_CONTAINER}" \
   --gpus all --network host --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=32g \
+  --cap-add=IPC_LOCK \
+  --device=/dev/infiniband/uverbs0 --device=/dev/infiniband/uverbs1 \
+  --device=/dev/infiniband/uverbs2 --device=/dev/infiniband/uverbs3 \
+  --device=/dev/infiniband/rdma_cm \
   -v "${MODEL_MOUNT_HOST}:${MODEL_MOUNT_CONT}:ro" \
   -v "${RUN_DIR}:/work" \
   -v "${RUN_DIR}/nccl.conf:/etc/nccl.conf:ro" \
   -v "${REPO_HOST}:/work/ProRL-Agent-Server:ro" \
   -e NVIDIA_VISIBLE_DEVICES=all \
   -e CUDA_VISIBLE_DEVICES=0 \
-  -e NCCL_IB_DISABLE=1 \
+  -e NCCL_IB_DISABLE=${NCCL_IB_DISABLE_VALUE} \
   -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NCCL_SOCKET_FAMILY=AF_INET \
-  -e NCCL_NET=Socket \
-  -e NCCL_NET_PLUGIN=none \
+  -e NCCL_NET=${NCCL_NET_VALUE} \
+  -e NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN_VALUE} \
+  -e NCCL_IB_HCA=${NCCL_IB_HCA} \
+  -e NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
@@ -538,11 +596,13 @@ set +e
 docker exec \
   -e RAY_ADDRESS="${HEAD_IP}:6379" \
   -e CUDA_VISIBLE_DEVICES=0 \
-  -e NCCL_IB_DISABLE=1 \
+  -e NCCL_IB_DISABLE=${NCCL_IB_DISABLE_VALUE} \
   -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NCCL_SOCKET_FAMILY=AF_INET \
-  -e NCCL_NET=Socket \
-  -e NCCL_NET_PLUGIN=none \
+  -e NCCL_NET=${NCCL_NET_VALUE} \
+  -e NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN_VALUE} \
+  -e NCCL_IB_HCA=${NCCL_IB_HCA} \
+  -e NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
