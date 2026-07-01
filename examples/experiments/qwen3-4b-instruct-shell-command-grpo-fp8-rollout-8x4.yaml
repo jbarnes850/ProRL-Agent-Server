@@ -1,0 +1,49 @@
+# Qwen3-4B-Instruct-2507 GRPO smoke on the shell-harness task type.
+# Same shape as the proven fp8 arithmetic baseline (8x4x1, fp8 rollout, RoCE,
+# gpu_memory_utilization=0.5); only the dataset + verifier.execution change.
+# The model proposes a shell command; the sandbox runs it; reward comes from
+# the command's actual stdout vs the expected output (execution-based, not
+# string-matched). Launch with POLAR_DATASET_RUNTIME_IMAGE=polar-spark-shell:latest.
+id: qwen3-4b-instruct-shell-command-grpo-fp8-rollout-8x4
+parent: qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4
+
+model:
+  name: Qwen/Qwen3-4B-Instruct-2507
+  snapshot: cdbee75f17c01a7cc42f958dc650907174af0554
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554
+  max_total_sequence_length: 4096
+
+dataset:
+  family: nemo_gym
+  source: nvidia/Nemotron-RL-ReasoningGym-v1
+  subset: shell_command
+  local_jsonl: examples/datasets/shell_command_curated.jsonl
+
+verifier:
+  type: exact_answer
+  execution: shell_command_exec
+
+algorithm:
+  name: grpo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 1
+  temperature: 1.0
+  top_p: 1.0
+
+precision:
+  train: bfloat16
+  rollout_backend: vllm
+  rollout: fp8
+  kv_cache_dtype: auto
+
+vllm_runtime:
+  gpu_memory_utilization: 0.5
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  max_num_seqs: 256
