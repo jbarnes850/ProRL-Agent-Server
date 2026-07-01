@@ -649,6 +649,65 @@ def _build_adapter(args: argparse.Namespace) -> DatasetAdapter:
     )
 
 
+def _build_config_dict(
+    args: argparse.Namespace,
+    adapter: DatasetAdapter,
+    output_dir: Path,
+    run_matrix: RunMatrixCell,
+    tasks: list[TaskSpec],
+) -> dict:
+    return {
+        "run_matrix": run_matrix.to_json_dict(),
+        "dataset": {
+            "id": adapter.dataset_id,
+            "config": args.config,
+            "split": args.split,
+            "limit": args.limit,
+            "scan_rows": args.scan_rows,
+            "local_jsonl": args.local_jsonl,
+            "source_dataset_filter": args.source_dataset,
+            "canonical_schema": "nemo_gym_jsonl",
+            "selection_mode": "group_cycle",
+            "answer_format": args.answer_format,
+            "provenance": _summarize_task_provenance(tasks),
+        },
+        "image": args.image,
+        "model": {"name": args.model_name, "path": args.model_path},
+        "generation": {
+            "max_new_tokens": args.model_max_tokens,
+            "temperature": args.model_temperature,
+            "top_p": args.model_top_p,
+            "top_k": None,
+            "vllm_generation_config": "vllm",
+            "vllm_runtime": {
+                "precision": args.vllm_precision,
+                "kv_cache_dtype": args.vllm_kv_cache_dtype,
+                "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+                "enforce_eager": args.vllm_enforce_eager,
+                "max_num_seqs": args.vllm_max_num_seqs,
+                "max_num_batched_tokens": args.vllm_max_num_batched_tokens,
+            },
+        },
+        "nemo_rl_ref": args.nemo_rl_ref,
+        "polar": {
+            "task_template": str(output_dir / "polar" / "task_template.json"),
+            "attempt_matrix": str(output_dir / "polar" / "attempt_matrix.json"),
+            "rollout_port": args.polar_rollout_port,
+            "gateway_port": args.polar_gateway_port,
+            "vllm_http_port": args.vllm_http_port,
+        },
+        "repo_host": args.repo_host,
+        "run_dir": str(output_dir),
+        "script_path": args.script_path,
+        "topology": {
+            "train_node": args.worker_hostname,
+            "train_ip": args.worker_ip,
+            "inference_rollout_node": args.head_hostname,
+            "inference_rollout_ip": args.head_ip,
+        },
+    }
+
+
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
@@ -682,56 +741,7 @@ def main() -> None:
     )
     write_json(
         output_dir / "config.json",
-        {
-            "run_matrix": run_matrix.to_json_dict(),
-            "dataset": {
-                "id": args.dataset_id,
-                "config": args.config,
-                "split": args.split,
-                "limit": args.limit,
-                "scan_rows": args.scan_rows,
-                "local_jsonl": args.local_jsonl,
-                "source_dataset_filter": args.source_dataset,
-                "canonical_schema": "nemo_gym_jsonl",
-                "selection_mode": "group_cycle",
-                "answer_format": args.answer_format,
-                "provenance": _summarize_task_provenance(tasks),
-            },
-            "image": args.image,
-            "model": {"name": args.model_name, "path": args.model_path},
-            "generation": {
-                "max_new_tokens": args.model_max_tokens,
-                "temperature": args.model_temperature,
-                "top_p": args.model_top_p,
-                "top_k": None,
-                "vllm_generation_config": "vllm",
-                "vllm_runtime": {
-                    "precision": args.vllm_precision,
-                    "kv_cache_dtype": args.vllm_kv_cache_dtype,
-                    "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
-                    "enforce_eager": args.vllm_enforce_eager,
-                    "max_num_seqs": args.vllm_max_num_seqs,
-                    "max_num_batched_tokens": args.vllm_max_num_batched_tokens,
-                },
-            },
-            "nemo_rl_ref": args.nemo_rl_ref,
-            "polar": {
-                "task_template": str(output_dir / "polar" / "task_template.json"),
-                "attempt_matrix": str(output_dir / "polar" / "attempt_matrix.json"),
-                "rollout_port": args.polar_rollout_port,
-                "gateway_port": args.polar_gateway_port,
-                "vllm_http_port": args.vllm_http_port,
-            },
-            "repo_host": args.repo_host,
-            "run_dir": str(output_dir),
-            "script_path": args.script_path,
-            "topology": {
-                "train_node": args.worker_hostname,
-                "train_ip": args.worker_ip,
-                "inference_rollout_node": args.head_hostname,
-                "inference_rollout_ip": args.head_ip,
-            },
-        },
+        _build_config_dict(args, adapter, output_dir, run_matrix, tasks),
     )
     write_json(
         output_dir / "train_data_audit.json",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from nemo_polar_bridge.datasets.base import TaskSpec
@@ -10,6 +11,7 @@ from nemo_polar_bridge.datasets.prepare_dataset import (
     build_attempt_matrix,
     build_task_template,
     _build_adapter,
+    _build_config_dict,
     _summarize_task_provenance,
 )
 from nemo_polar_bridge.datasets.reasoning_gym_adapter import ReasoningGymDatasetAdapter
@@ -200,6 +202,81 @@ def test_build_adapter_selects_reasoning_gym() -> None:
     assert isinstance(adapter, ReasoningGymDatasetAdapter)
     assert adapter.task_name == "basic_arithmetic"
     assert adapter.seed == 7
+
+
+def _config_dict_args(**overrides: object) -> SimpleNamespace:
+    defaults = dict(
+        dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1",
+        config="default",
+        split="train",
+        limit=2,
+        scan_rows=200,
+        local_jsonl=None,
+        source_dataset=[],
+        answer_format="none",
+        image="local/nemo-rl-main-cu132:c236061b",
+        model_name="Qwen/Qwen3-1.7B",
+        model_path="/host-hf/hub/models--Qwen--Qwen3-1.7B",
+        model_max_tokens=1024,
+        model_temperature=1.0,
+        model_top_p=1.0,
+        vllm_precision="bfloat16",
+        vllm_kv_cache_dtype="auto",
+        vllm_gpu_memory_utilization=0.35,
+        vllm_enforce_eager="true",
+        vllm_max_num_seqs=None,
+        vllm_max_num_batched_tokens=None,
+        nemo_rl_ref="c236061b250e97638722292ab8a54d5eb47ae00f",
+        polar_rollout_port=19080,
+        polar_gateway_port=19100,
+        vllm_http_port=31000,
+        repo_host="/home/jarrodbarnes/ProRL-Agent-Server",
+        script_path="scripts/smoke/run_nemo_polar_external_collector_spark_smoke.sh",
+        worker_hostname="spark-cfd0",
+        worker_ip="192.168.100.11",
+        head_hostname="spark-f7e2",
+        head_ip="192.168.100.10",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def test_build_config_dict_reports_the_adapters_real_dataset_id_not_the_cli_arg() -> None:
+    # args.dataset_id is the NeMo Gym CLI default and is ignored by
+    # ReasoningGymDatasetAdapter (see _build_adapter). The manifest must not
+    # echo that ignored value back as though it were the real source -- it
+    # must report what the adapter actually used, so `validation_summary.json`
+    # stays trustworthy evidence rather than a misleading label.
+    args = _config_dict_args(dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1")
+    adapter = ReasoningGymDatasetAdapter(task_name="basic_arithmetic", seed=0)
+    run_matrix = RunMatrixCell(
+        name="smoke:exact-answer-single-turn-chat",
+        dataset_family="reasoning_gym",
+        verifier_type="exact_answer",
+        execution_type="single_turn_chat",
+        adapter="nemo_gym_jsonl",
+    )
+
+    config = _build_config_dict(args, adapter, Path("/tmp/run"), run_matrix, [])
+
+    assert config["dataset"]["id"] == "reasoning-gym/basic_arithmetic"
+    assert config["dataset"]["id"] != args.dataset_id
+
+
+def test_build_config_dict_reports_nemo_gym_dataset_id_unchanged() -> None:
+    args = _config_dict_args(dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1")
+    adapter = NeMoGymDatasetAdapter(dataset_id=args.dataset_id)
+    run_matrix = RunMatrixCell(
+        name="smoke:exact-answer-single-turn-chat",
+        dataset_family="nemo_gym",
+        verifier_type="exact_answer",
+        execution_type="single_turn_chat",
+        adapter="nemo_gym_jsonl",
+    )
+
+    config = _build_config_dict(args, adapter, Path("/tmp/run"), run_matrix, [])
+
+    assert config["dataset"]["id"] == "nvidia/Nemotron-RL-ReasoningGym-v1"
 
 
 def test_summarize_task_provenance_carries_materials_hashes() -> None:
