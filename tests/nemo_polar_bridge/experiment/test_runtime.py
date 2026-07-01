@@ -108,6 +108,26 @@ def test_drgrpo_ablation_emits_single_extra_override():
     assert plan.extra_overrides == ["grpo.normalize_rewards=false"]
 
 
+def test_in_flight_weight_updates_false_reaches_the_launch_command():
+    # The smoke script hardcodes in_flight_weight_updates=true with no env-var
+    # hook; this must reach the launch command as a positional override
+    # (appended after the smoke script's own hardcoded Hydra args) or the
+    # spec's value silently has no effect at GPU-launch time.
+    spec = grpo_spec()
+    spec.async_grpo.in_flight_weight_updates = False
+    plan = compose_launch(spec, RuntimeProfile.two_spark())
+    assert plan.extra_overrides == ["grpo.async_grpo.in_flight_weight_updates=false"]
+
+
+def test_recompute_kv_cache_true_reaches_the_launch_command():
+    spec = grpo_spec()
+    spec.async_grpo.recompute_kv_cache = True
+    plan = compose_launch(spec, RuntimeProfile.two_spark())
+    assert plan.extra_overrides == [
+        "grpo.async_grpo.recompute_kv_cache_after_weight_updates=true"
+    ]
+
+
 def test_shell_rendering_is_runnable_and_self_describing():
     plan = compose_launch(ablation("cispo"), RuntimeProfile.two_spark())
     shell = plan.shell()

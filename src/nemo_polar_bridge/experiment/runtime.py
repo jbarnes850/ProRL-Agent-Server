@@ -49,8 +49,19 @@ SMOKE_COVERED_KEYS = frozenset(
     {
         "grpo.async_grpo.enabled",
         "grpo.async_grpo.max_trajectory_age_steps",
-        "grpo.async_grpo.in_flight_weight_updates",
-        "grpo.async_grpo.recompute_kv_cache_after_weight_updates",
+        # NOT in_flight_weight_updates / recompute_kv_cache_after_weight_updates:
+        # unlike every other key here, the smoke script hardcodes literal
+        # `=true`/`=false` with no env-var hook (verified against
+        # run_nemo_polar_external_collector_spark_smoke.sh:546-547), so
+        # treating them as "covered" silently dropped a spec's differing
+        # value. compile.py only emits these two when they diverge from the
+        # smoke script's hardcoded defaults (see compile.py), so the GRPO
+        # baseline (which uses those defaults) still composes to zero
+        # positional extras; a spec that flips one reaches the launch
+        # command as a positional override, appended after the smoke
+        # script's own hardcoded args, so Hydra's last-override-wins
+        # semantics apply -- the same mechanism the CISPO loss_fn.* keys
+        # already use.
         "grpo.num_prompts_per_step",
         "grpo.num_generations_per_prompt",
         "grpo.max_num_steps",

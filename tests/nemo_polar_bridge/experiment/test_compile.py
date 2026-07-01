@@ -57,8 +57,13 @@ def test_proven_grpo_run_compiles_to_known_good_overrides():
     # async / two-Spark disaggregation
     assert ov["grpo.async_grpo.enabled"] is True
     assert ov["grpo.async_grpo.max_trajectory_age_steps"] == 1
-    assert ov["grpo.async_grpo.in_flight_weight_updates"] is True
-    assert ov["grpo.async_grpo.recompute_kv_cache_after_weight_updates"] is False
+    # in_flight_weight_updates/recompute_kv_cache_after_weight_updates are
+    # emitted only when they diverge from the smoke script's own hardcoded
+    # defaults (true/false); the baseline spec uses those defaults, so
+    # neither key appears here (see compile.py and runtime.py's
+    # SMOKE_COVERED_KEYS comment for why).
+    assert "grpo.async_grpo.in_flight_weight_updates" not in ov
+    assert "grpo.async_grpo.recompute_kv_cache_after_weight_updates" not in ov
     assert ov["policy.generation.colocated.enabled"] is False
     assert ov["policy.generation.colocated.resources.gpus_per_node"] == 1
     assert ov["policy.generation.colocated.resources.num_nodes"] == 1
@@ -93,6 +98,24 @@ def test_proven_grpo_run_compiles_to_known_good_overrides():
     assert ov["data.default.processor"] == "math_hf_data_processor"
     assert ov["data.default.env_name"] == "math"
     assert ov["data_plane.enabled"] is False
+
+
+def test_in_flight_weight_updates_false_emits_only_the_delta():
+    spec = proven_run_spec()
+    spec.async_grpo.in_flight_weight_updates = False
+    ov = compile_spec(spec).nemo_overrides_dict()
+    assert ov["grpo.async_grpo.in_flight_weight_updates"] is False
+    # matches the smoke default, so still not declared
+    assert "grpo.async_grpo.recompute_kv_cache_after_weight_updates" not in ov
+
+
+def test_recompute_kv_cache_true_emits_only_the_delta():
+    spec = proven_run_spec()
+    spec.async_grpo.recompute_kv_cache = True
+    ov = compile_spec(spec).nemo_overrides_dict()
+    assert ov["grpo.async_grpo.recompute_kv_cache_after_weight_updates"] is True
+    # matches the smoke default, so still not declared
+    assert "grpo.async_grpo.in_flight_weight_updates" not in ov
 
 
 def test_cispo_axis_sets_required_loss_flags():

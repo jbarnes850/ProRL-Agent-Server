@@ -80,10 +80,20 @@ def compile_spec(spec: ExperimentSpec) -> CompiledExperiment:
     # async / two-Spark disaggregation
     ov.append(("grpo.async_grpo.enabled", ag.enabled))
     ov.append(("grpo.async_grpo.max_trajectory_age_steps", ag.lag))
-    ov.append(("grpo.async_grpo.in_flight_weight_updates", ag.in_flight_weight_updates))
-    ov.append(
-        ("grpo.async_grpo.recompute_kv_cache_after_weight_updates", ag.recompute_kv_cache)
-    )
+    # Emitted only on divergence: the smoke script hardcodes
+    # in_flight_weight_updates=true / recompute_kv_cache_after_weight_updates=false
+    # with no env-var hook (unlike every other SMOKE_COVERED_KEYS entry), so
+    # runtime.py routes these two through positional EXTRA_OVERRIDES rather
+    # than an env var. Emitting them unconditionally would make every spec
+    # (including the GRPO baseline) carry positional extras that just repeat
+    # the smoke script's own defaults; emitting only the delta keeps the
+    # baseline's zero-positional-extras invariant intact.
+    if ag.in_flight_weight_updates is not True:
+        ov.append(("grpo.async_grpo.in_flight_weight_updates", ag.in_flight_weight_updates))
+    if ag.recompute_kv_cache is not False:
+        ov.append(
+            ("grpo.async_grpo.recompute_kv_cache_after_weight_updates", ag.recompute_kv_cache)
+        )
 
     # rollout shape
     ov.append(("grpo.num_prompts_per_step", r.prompts_per_step))
