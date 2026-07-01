@@ -1,0 +1,51 @@
+# Phase 4 cell 4: gpu_memory_utilization sweep point (0.35), else identical
+# to the passing FP8 GRPO baseline. max_num_seqs sweep is not informative at
+# this shape (8x4=32 total sequences, far under 256); gpu_memory_utilization
+# is the axis that actually caused a real OOM earlier, so that's what's swept.
+#
+# Validate (no GPU) inside the image before launching:
+#   python scripts/experiment/validate_against_nemo_loader.py \
+#     examples/experiments/qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4-gpuutil035.yaml
+id: qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4-gpuutil035
+parent: qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4
+
+model:
+  name: Qwen/Qwen3-4B-Instruct-2507
+  snapshot: cdbee75f17c01a7cc42f958dc650907174af0554
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554
+  max_total_sequence_length: 4096
+
+dataset:
+  family: nemo_gym
+  source: nvidia/Nemotron-RL-ReasoningGym-v1
+  subset: basic_arithmetic
+  local_jsonl: examples/datasets/basic_arithmetic_curated.jsonl
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: grpo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 1
+  temperature: 1.0
+  top_p: 1.0
+
+precision:
+  train: bfloat16
+  rollout_backend: vllm
+  rollout: fp8
+  kv_cache_dtype: auto
+
+vllm_runtime:
+  gpu_memory_utilization: 0.35
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  max_num_seqs: 256
