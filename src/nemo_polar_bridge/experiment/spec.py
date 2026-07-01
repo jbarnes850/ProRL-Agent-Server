@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 Objective = Literal["grpo", "drgrpo", "dapo", "cispo", "gspo", "rloo"]
 Advantage = Literal["grpo", "gdpo", "reinforce_plus_plus"]
+DatasetFamily = Literal["nemo_gym", "reasoning_gym"]
 
 _STRICT = ConfigDict(extra="forbid")
 
@@ -44,7 +45,7 @@ class Model(BaseModel):
 class Dataset(BaseModel):
     model_config = _STRICT
 
-    family: str = "nemo_gym"
+    family: DatasetFamily = "nemo_gym"
     source: Optional[str] = None
     subset: Optional[str] = None
     local_jsonl: Optional[str] = None

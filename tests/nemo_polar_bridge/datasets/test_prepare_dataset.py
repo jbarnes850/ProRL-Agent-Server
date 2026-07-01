@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from nemo_polar_bridge.datasets.base import TaskSpec
 from nemo_polar_bridge.datasets.data_loader import NeMoGymDatasetAdapter
 from nemo_polar_bridge.datasets.prepare_dataset import (
@@ -204,6 +206,21 @@ def test_build_adapter_selects_reasoning_gym() -> None:
     assert adapter.seed == 7
 
 
+def test_build_adapter_rejects_unknown_dataset_family() -> None:
+    # A typo'd --dataset-family previously fell through silently to
+    # NeMoGymDatasetAdapter, training on the wrong dataset with no error.
+    args = SimpleNamespace(
+        dataset_family="reasoning_gm",
+        dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1",
+        config="default",
+        split="train",
+        local_jsonl=None,
+        source_dataset=[],
+    )
+    with pytest.raises(ValueError, match="Unsupported --dataset-family"):
+        _build_adapter(args)
+
+
 def _config_dict_args(**overrides: object) -> SimpleNamespace:
     defaults = dict(
         dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1",
@@ -249,6 +266,7 @@ def test_build_config_dict_reports_the_adapters_real_dataset_id_not_the_cli_arg(
     # stays trustworthy evidence rather than a misleading label.
     args = _config_dict_args(dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1")
     adapter = ReasoningGymDatasetAdapter(task_name="basic_arithmetic", seed=0)
+    tasks = adapter.load_tasks(limit=1, scan_rows=1)
     run_matrix = RunMatrixCell(
         name="smoke:exact-answer-single-turn-chat",
         dataset_family="reasoning_gym",
@@ -257,15 +275,20 @@ def test_build_config_dict_reports_the_adapters_real_dataset_id_not_the_cli_arg(
         adapter="nemo_gym_jsonl",
     )
 
-    config = _build_config_dict(args, adapter, Path("/tmp/run"), run_matrix, [])
+    config = _build_config_dict(args, adapter, Path("/tmp/run"), run_matrix, tasks)
 
     assert config["dataset"]["id"] == "reasoning-gym/basic_arithmetic"
     assert config["dataset"]["id"] != args.dataset_id
+    assert config["dataset"]["canonical_schema"] == "reasoning_gym_procedural"
 
 
 def test_build_config_dict_reports_nemo_gym_dataset_id_unchanged() -> None:
     args = _config_dict_args(dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1")
     adapter = NeMoGymDatasetAdapter(dataset_id=args.dataset_id)
+    # audit() is normally populated by load_tasks(); NeMoGymDatasetAdapter's
+    # load_tasks() hits the network (HF dataset) absent a local_jsonl fixture,
+    # so set the audit dict directly rather than exercising a real fetch here.
+    adapter._audit = {"canonical_schema": "nemo_gym_jsonl"}
     run_matrix = RunMatrixCell(
         name="smoke:exact-answer-single-turn-chat",
         dataset_family="nemo_gym",

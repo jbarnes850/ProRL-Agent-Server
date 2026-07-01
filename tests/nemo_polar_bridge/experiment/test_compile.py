@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_polar_bridge.experiment import ExperimentSpec, SpecCompileError, compile_spec
 
@@ -98,6 +99,27 @@ def test_proven_grpo_run_compiles_to_known_good_overrides():
     assert ov["data.default.processor"] == "math_hf_data_processor"
     assert ov["data.default.env_name"] == "math"
     assert ov["data_plane.enabled"] is False
+
+
+def test_dataset_family_rejects_unknown_value():
+    # A typo'd dataset.family previously validated fine as a bare str and
+    # would only surface as a silent fallthrough deep in prepare_dataset.py's
+    # adapter dispatch. It must fail fast at spec-construction time instead.
+    with pytest.raises(ValidationError, match="family"):
+        ExperimentSpec(
+            id="qwen3-1p7b-basic_arith-grpo-8x4",
+            model={
+                "name": "Qwen/Qwen3-1.7B",
+                "snapshot": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+                "nemo_path": QWEN3_1P7B_NEMO_PATH,
+                "max_total_sequence_length": 4096,
+            },
+            dataset={"family": "reasoning_gm"},
+            verifier={"type": "exact_answer", "execution": "single_turn_chat"},
+            algorithm={"name": "grpo"},
+            async_grpo={"lag": 1},
+            rollout={"prompts_per_step": 8, "generations_per_prompt": 4, "max_steps": 2},
+        )
 
 
 def test_in_flight_weight_updates_false_emits_only_the_delta():

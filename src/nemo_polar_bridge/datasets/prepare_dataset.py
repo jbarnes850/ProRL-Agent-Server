@@ -547,7 +547,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--script-path", default="")
     parser.add_argument("--matrix-name", default="smoke")
     parser.add_argument("--matrix-cell", default="")
-    parser.add_argument("--dataset-family", default="nemo_gym")
+    parser.add_argument(
+        "--dataset-family", default="nemo_gym", choices=("nemo_gym", "reasoning_gym")
+    )
     parser.add_argument(
         "--reasoning-gym-task-name",
         default="basic_arithmetic",
@@ -640,6 +642,8 @@ def _build_adapter(args: argparse.Namespace) -> DatasetAdapter:
             split=args.split,
             config=args.config,
         )
+    if args.dataset_family != "nemo_gym":
+        raise ValueError(f"Unsupported --dataset-family: {args.dataset_family!r}")
     return NeMoGymDatasetAdapter(
         dataset_id=args.dataset_id,
         config=args.config,
@@ -666,7 +670,7 @@ def _build_config_dict(
             "scan_rows": args.scan_rows,
             "local_jsonl": args.local_jsonl,
             "source_dataset_filter": args.source_dataset,
-            "canonical_schema": "nemo_gym_jsonl",
+            "canonical_schema": adapter.audit()["canonical_schema"],
             "selection_mode": "group_cycle",
             "answer_format": args.answer_format,
             "provenance": _summarize_task_provenance(tasks),
@@ -780,8 +784,8 @@ def main() -> None:
         textwrap.dedent(
             f"""\
             prepared_dataset={output_dir}
-            dataset={args.dataset_id}
-            canonical_schema=nemo_gym_jsonl
+            dataset={adapter.dataset_id}
+            canonical_schema={adapter.audit()["canonical_schema"]}
             run_matrix={run_matrix.name}
             selected_tasks={[task.stable_id() for task in tasks]}
             selection_mode=group_cycle
