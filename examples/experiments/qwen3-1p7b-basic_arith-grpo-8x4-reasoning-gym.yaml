@@ -1,0 +1,38 @@
+# NeMo Gym integration Phase 3 (human-operator GPU step, per
+# docs/goals/2026-06-30-nemo-gym-reasoning-integration-rider.md): re-run the
+# proven Qwen3-1.7B GRPO baseline with the real reasoning-gym dependency
+# (ReasoningGymDatasetAdapter) as the dataset/verifier source instead of the
+# HF-exported nvidia/Nemotron-RL-ReasoningGym-v1 dataset. Same model,
+# algorithm, and shape as the proven qwen3-1p7b-basic_arith-grpo-8x4 baseline
+# -- only the dataset source changes, isolating whether the new adapter
+# reproduces a working end-to-end run.
+#
+# Validate (no GPU) inside the image before launching:
+#   python scripts/experiment/validate_against_nemo_loader.py \
+#     examples/experiments/qwen3-1p7b-basic_arith-grpo-8x4-reasoning-gym.yaml
+id: qwen3-1p7b-basic_arith-grpo-8x4-reasoning-gym
+parent: qwen3-1p7b-basic_arith-grpo-8x4
+
+model:
+  name: Qwen/Qwen3-1.7B
+  snapshot: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  max_total_sequence_length: 4096
+
+dataset:
+  family: reasoning_gym
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: grpo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 2

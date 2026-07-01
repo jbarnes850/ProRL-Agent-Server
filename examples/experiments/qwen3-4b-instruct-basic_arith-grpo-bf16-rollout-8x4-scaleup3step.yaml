@@ -1,0 +1,56 @@
+# Phase 4 cell 6: scale-up confirmation. Winning config from cells 1-5 (bf16
+# rollout beat fp8 on both total_step_time_s and weight_sync_s; grpo vs cispo
+# showed no throughput difference so grpo stands as the primary baseline;
+# gpu_memory_utilization=0.5 is the safest point in the proven-safe [0.35,
+# 0.5] range; both weight-sync toggles showed no effect at single-step so
+# defaults stand), rerun at max_steps=3 to report a sustained, not just
+# peak, number and to give recompute_kv_cache_after_weight_updates a real
+# multi-step chance to matter (step 2+ has a prior weight version to
+# invalidate, unlike cell 5b's single step).
+#
+# Validate (no GPU) inside the image before launching:
+#   python scripts/experiment/validate_against_nemo_loader.py \
+#     examples/experiments/qwen3-4b-instruct-basic_arith-grpo-bf16-rollout-8x4-scaleup3step.yaml
+id: qwen3-4b-instruct-basic_arith-grpo-bf16-rollout-8x4-scaleup3step
+parent: qwen3-4b-instruct-basic_arith-grpo-bf16-rollout-8x4
+
+model:
+  name: Qwen/Qwen3-4B-Instruct-2507
+  snapshot: cdbee75f17c01a7cc42f958dc650907174af0554
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554
+  max_total_sequence_length: 4096
+
+dataset:
+  family: nemo_gym
+  source: nvidia/Nemotron-RL-ReasoningGym-v1
+  subset: basic_arithmetic
+  local_jsonl: examples/datasets/basic_arithmetic_curated.jsonl
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: grpo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 3
+  temperature: 1.0
+  top_p: 1.0
+
+precision:
+  train: bfloat16
+  rollout_backend: vllm
+  rollout: bfloat16
+  kv_cache_dtype: auto
+
+vllm_runtime:
+  gpu_memory_utilization: 0.5
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  max_num_seqs: 256
