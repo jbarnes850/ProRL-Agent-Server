@@ -40,6 +40,8 @@ def test_grpo_baseline_composes_to_env_only_no_positional_extras():
     assert plan.env["NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS"] == "1"
     assert plan.env["POLAR_MODEL_NAME"] == "Qwen/Qwen3-1.7B"
     assert plan.env["POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH"] == "4096"
+    assert plan.env["NEMO_VLLM_PRECISION"] == "bfloat16"
+    assert plan.env["NEMO_VLLM_KV_CACHE_DTYPE"] == "auto"
     assert plan.env["POLAR_DATASET_FAMILY"] == "nemo_gym"
     assert plan.env["POLAR_VERIFIER_TYPE"] == "exact_answer"
     assert plan.env["POLAR_EXECUTION_TYPE"] == "single_turn_chat"
@@ -70,6 +72,32 @@ def test_cispo_ablation_emits_algorithm_axis_as_positional_overrides():
     assert plan.env["NEMO_GRPO_NUM_PROMPTS_PER_STEP"] == "8"
     # algorithm keys live only as positional overrides, never in env
     assert not any("cispo" in v.lower() for v in plan.env.values())
+
+
+def test_qwen3_4b_fp8_rollout_spec_maps_runtime_env():
+    spec_path = (
+        REPO_ROOT
+        / "examples"
+        / "experiments"
+        / "qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4.yaml"
+    )
+    plan = compose_launch(ExperimentSpec.from_yaml(spec_path), RuntimeProfile.two_spark())
+
+    assert plan.env["POLAR_MODEL_NAME"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert plan.env["NEMO_VLLM_PRECISION"] == "fp8"
+    assert plan.env["NEMO_VLLM_KV_CACHE_DTYPE"] == "auto"
+    assert plan.env["NEMO_VLLM_GPU_MEMORY_UTILIZATION"] == "0.9"
+    assert plan.env["NEMO_VLLM_ENFORCE_EAGER"] == "false"
+    assert plan.env["NEMO_VLLM_MAX_NUM_BATCHED_TOKENS"] == "16384"
+    assert plan.env["NEMO_VLLM_MAX_NUM_SEQS"] == "256"
+    assert plan.env["POLAR_DATASET_LOCAL_JSONL"] == (
+        "examples/datasets/basic_arithmetic_curated.jsonl"
+    )
+    assert plan.env["MODEL_HOST"].endswith(
+        "models--Qwen--Qwen3-4B-Instruct-2507/snapshots/"
+        "cdbee75f17c01a7cc42f958dc650907174af0554"
+    )
+    assert plan.extra_overrides == []
 
 
 def test_drgrpo_ablation_emits_single_extra_override():

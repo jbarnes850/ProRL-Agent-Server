@@ -24,6 +24,7 @@ from .spec import (
     Rollout,
     Topology,
     Verifier,
+    VllmRuntime,
 )
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "SpecCompileError",
     "Topology",
     "Verifier",
+    "VllmRuntime",
     "compile_spec",
     "compiled_digest",
     "compose_launch",

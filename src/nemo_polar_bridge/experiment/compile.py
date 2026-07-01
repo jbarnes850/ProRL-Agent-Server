@@ -114,6 +114,8 @@ def compile_spec(spec: ExperimentSpec) -> CompiledExperiment:
     # generation / topology shape
     ov.append(("policy.generation.backend", spec.precision.rollout_backend))
     ov.append(("policy.generation.vllm_cfg.async_engine", True))
+    ov.append(("policy.generation.vllm_cfg.precision", spec.precision.rollout))
+    ov.append(("policy.generation.vllm_cfg.kv_cache_dtype", spec.precision.kv_cache_dtype))
     ov.append(("policy.generation.vllm_cfg.max_model_len", m.max_total_sequence_length))
     ov.append(("policy.generation.temperature", r.temperature))
     ov.append(("policy.generation.top_p", r.top_p))

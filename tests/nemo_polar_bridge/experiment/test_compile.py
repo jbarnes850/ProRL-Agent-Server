@@ -85,6 +85,8 @@ def test_proven_grpo_run_compiles_to_known_good_overrides():
     assert ov["policy.max_total_sequence_length"] == 4096
     assert ov["policy.generation.backend"] == "vllm"
     assert ov["policy.generation.vllm_cfg.async_engine"] is True
+    assert ov["policy.generation.vllm_cfg.precision"] == "bfloat16"
+    assert ov["policy.generation.vllm_cfg.kv_cache_dtype"] == "auto"
     assert ov["policy.generation.vllm_cfg.max_model_len"] == 4096
 
     # verifier -> processor/env mapping
@@ -106,6 +108,24 @@ def test_cispo_axis_sets_required_loss_flags():
     # Laguna parity: (c_low, c_high) = (1, 4) -> NeMo clamp [1-1, 1+4] = [0, 5]
     assert ov["loss_fn.ratio_clip_min"] == 1.0
     assert ov["loss_fn.ratio_clip_max"] == 4.0
+
+
+def test_fp8_rollout_precision_sets_vllm_only_not_policy_precision():
+    spec = proven_run_spec()
+    spec.id = "qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4"
+    spec.model.name = "Qwen/Qwen3-4B-Instruct-2507"
+    spec.model.snapshot = "cdbee75f17c01a7cc42f958dc650907174af0554"
+    spec.model.nemo_path = (
+        "/host-hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/"
+        "cdbee75f17c01a7cc42f958dc650907174af0554"
+    )
+    spec.precision.rollout = "fp8"
+    spec.precision.kv_cache_dtype = "auto"
+    ov = compile_spec(spec).nemo_overrides_dict()
+
+    assert ov["policy.generation.vllm_cfg.precision"] == "fp8"
+    assert ov["policy.generation.vllm_cfg.kv_cache_dtype"] == "auto"
+    assert "policy.precision" not in ov
 
 
 def test_drgrpo_objective_disables_std_norm_only():

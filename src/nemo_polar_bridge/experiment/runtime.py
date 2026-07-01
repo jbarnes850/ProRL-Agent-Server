@@ -15,6 +15,7 @@ is the experiment's novel contribution and is emitted positionally.
 
 from __future__ import annotations
 
+import os
 import shlex
 from dataclasses import dataclass
 from typing import Optional
@@ -26,6 +27,13 @@ from .compile import compile_spec
 from .spec import ExperimentSpec
 
 DEFAULT_SMOKE_SCRIPT = "scripts/smoke/run_nemo_polar_external_collector_spark_smoke.sh"
+DEFAULT_HF_HUB_HOST_ROOT = "/home/jarrodbarnes/.cache/huggingface/hub"
+
+
+def _default_hf_hub_host_root() -> str:
+    """Overridable so a clone off Jarrod's machine can point at its own HF cache."""
+
+    return os.environ.get("NEMO_POLAR_HF_HUB_HOST_ROOT", DEFAULT_HF_HUB_HOST_ROOT)
 
 # The smoke-covered keys the compiler can also emit: a curated subset of the keys
 # the smoke launcher sets (run_nemo_polar_external_collector_spark_smoke.sh:
@@ -74,6 +82,8 @@ SMOKE_COVERED_KEYS = frozenset(
         "policy.generation.port_range_high",
         "policy.generation.vllm_cfg.async_engine",
         "policy.generation.vllm_cfg.enable_vllm_metrics_logger",
+        "policy.generation.vllm_cfg.precision",
+        "policy.generation.vllm_cfg.kv_cache_dtype",
         "policy.generation.vllm_cfg.max_model_len",
         "policy.generation.colocated.enabled",
         "policy.generation.colocated.resources.gpus_per_node",
@@ -101,7 +111,7 @@ class RuntimeProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     smoke_script: str = DEFAULT_SMOKE_SCRIPT
-    hf_hub_host_root: str = "/home/jarrodbarnes/.cache/huggingface/hub"
+    hf_hub_host_root: str = Field(default_factory=_default_hf_hub_host_root)
     model_cont_root: str = "/host-hf/hub"
     matrix_name: str = "smoke"
     image: Optional[str] = None
@@ -142,6 +152,10 @@ def _hf_snapshot_subpath(name: str, snapshot: str) -> str:
     return f"models--{name.replace('/', '--')}/snapshots/{snapshot}"
 
 
+def _env_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
 def compose_launch(
     spec: ExperimentSpec,
     profile: RuntimeProfile,
@@ -171,6 +185,20 @@ def compose_launch(
     env["POLAR_MODEL_MAX_MODEL_LEN"] = str(model.max_total_sequence_length)
     env["POLAR_MODEL_TEMPERATURE"] = str(spec.rollout.temperature)
     env["POLAR_MODEL_TOP_P"] = str(spec.rollout.top_p)
+    env["NEMO_VLLM_PRECISION"] = spec.precision.rollout
+    env["NEMO_VLLM_KV_CACHE_DTYPE"] = spec.precision.kv_cache_dtype
+    if spec.vllm_runtime.gpu_memory_utilization is not None:
+        env["NEMO_VLLM_GPU_MEMORY_UTILIZATION"] = str(
+            spec.vllm_runtime.gpu_memory_utilization
+        )
+    if spec.vllm_runtime.enforce_eager is not None:
+        env["NEMO_VLLM_ENFORCE_EAGER"] = _env_bool(spec.vllm_runtime.enforce_eager)
+    if spec.vllm_runtime.max_num_seqs is not None:
+        env["NEMO_VLLM_MAX_NUM_SEQS"] = str(spec.vllm_runtime.max_num_seqs)
+    if spec.vllm_runtime.max_num_batched_tokens is not None:
+        env["NEMO_VLLM_MAX_NUM_BATCHED_TOKENS"] = str(
+            spec.vllm_runtime.max_num_batched_tokens
+        )
     if model.snapshot:
         subpath = _hf_snapshot_subpath(model.name, model.snapshot)
         env["MODEL_HOST"] = f"{profile.hf_hub_host_root}/{subpath}"
@@ -185,6 +213,8 @@ def compose_launch(
         env["POLAR_DATASET_ID"] = spec.dataset.source
     if spec.dataset.subset:
         env["POLAR_SOURCE_DATASETS"] = spec.dataset.subset
+    if spec.dataset.local_jsonl:
+        env["POLAR_DATASET_LOCAL_JSONL"] = spec.dataset.local_jsonl
     # matrix
     env["POLAR_MATRIX_NAME"] = profile.matrix_name
     if matrix_cell:

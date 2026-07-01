@@ -47,6 +47,7 @@ class Dataset(BaseModel):
     family: str = "nemo_gym"
     source: Optional[str] = None
     subset: Optional[str] = None
+    local_jsonl: Optional[str] = None
 
 
 class Verifier(BaseModel):
@@ -114,7 +115,17 @@ class Precision(BaseModel):
 
     train: str = "bfloat16"
     rollout_backend: Literal["vllm", "sglang"] = "vllm"
+    rollout: str = "bfloat16"
     kv_cache_dtype: str = "auto"
+
+
+class VllmRuntime(BaseModel):
+    model_config = _STRICT
+
+    gpu_memory_utilization: Optional[float] = None
+    enforce_eager: Optional[bool] = None
+    max_num_seqs: Optional[int] = None
+    max_num_batched_tokens: Optional[int] = None
 
 
 class ExperimentSpec(BaseModel):
@@ -130,6 +141,7 @@ class ExperimentSpec(BaseModel):
     rollout: Rollout
     topology: Topology = Field(default_factory=Topology)
     precision: Precision = Field(default_factory=Precision)
+    vllm_runtime: VllmRuntime = Field(default_factory=VllmRuntime)
 
     @classmethod
     def from_yaml(cls, path) -> "ExperimentSpec":
