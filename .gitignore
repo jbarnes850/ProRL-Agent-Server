@@ -116,11 +116,8 @@ slime/
 Megatron-LM/
 glm/
 
-# Generated documentation, except the goals/ riders and results docs a blog
-# post's claims are sourced from -- those ship with the repo so every claim
-# has a tracked artifact behind it (P5.4).
+# experiment logs kept internal
 docs/*
-!docs/goals/
 /site
 
 # Dashboard frontend build artifacts
