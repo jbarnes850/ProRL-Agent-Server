@@ -53,6 +53,22 @@ fi
 # than a few GB. Capping it recovers real headroom (observed: Cell 6 scale-up
 # OOM'd on spark-cfd0 with a ~0.3GB/0.25% margin at the default reservation).
 RAY_OBJECT_STORE_MEMORY_BYTES="${RAY_OBJECT_STORE_MEMORY_BYTES:-8589934592}"
+# P5.2 diagnostic (free -m / docker stats polled every 8s through a real
+# 3-step run on spark-cfd0) confirmed: docker's reported container memory
+# stays flat/low (e.g. ~5GB) while true host `free -m` usage grows sharply
+# and repeatedly during each refit's weight-broadcast phase specifically
+# (observed transient spikes up to ~85GB host-vs-docker gap during a single
+# refit, receding afterward) -- not a smooth per-step leak, but real memory
+# concentrated around packed_broadcast_producer's bucket buffer that
+# Docker's cgroup accounting on this unified-memory (Grace Blackwell) host
+# doesn't attribute to the container. NRL_REFIT_BUFFER_MEMORY_RATIO sizes
+# that exact buffer (fraction of device memory per bucket, doubled via
+# NRL_REFIT_NUM_BUFFERS' double-buffering) -- default here (0.05) has been
+# the value since this bridge's original commit, not a deliberate tuning
+# choice; override lower (e.g. 0.02, upstream NeMo RL's own documented
+# default) to shrink the transient spike with margin against the true host
+# RSS this diagnostic measured, not what cgroup reports.
+NRL_REFIT_BUFFER_MEMORY_RATIO="${NRL_REFIT_BUFFER_MEMORY_RATIO:-0.05}"
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_MOUNT_HOST="${MODEL_MOUNT_HOST:-}"
@@ -456,7 +472,7 @@ COMMON_ENV=(
   -e NCCL_DEBUG=INFO
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
-  -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05
+  -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO}
   -e PYTHONUNBUFFERED=1
   -e HF_HOME=/work/hf
   -e UV_CACHE_DIR=/work/uv-cache
@@ -535,7 +551,7 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
-  -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05 \
+  -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO} \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/work/hf \
   -e UV_CACHE_DIR=/work/uv-cache \
@@ -606,7 +622,7 @@ docker exec \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
-  -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05 \
+  -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO} \
   -e PYTHONUNBUFFERED=1 \
   -e PYTHONPATH=/work/ProRL-Agent-Server/src:/opt/nemo-rl \
   -e NEMO_POLAR_ROLLOUT_URL=http://${HEAD_IP}:${POLAR_ROLLOUT_PORT} \
