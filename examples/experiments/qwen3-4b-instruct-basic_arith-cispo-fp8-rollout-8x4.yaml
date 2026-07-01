@@ -1,0 +1,54 @@
+# Qwen3-4B-Instruct-2507 CISPO smoke with NeMo BF16 training and FP8 vLLM
+# rollout. One-axis ablation off the passing GRPO FP8 baseline
+# (qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4): algorithm only.
+# Clip defaults to Laguna parity (1, 4). Keeps KV cache on auto; FP8 KV cache
+# is a separate backend spike.
+#
+# Validate (no GPU) inside the image before launching:
+#   python scripts/experiment/validate_against_nemo_loader.py \
+#     examples/experiments/qwen3-4b-instruct-basic_arith-cispo-fp8-rollout-8x4.yaml
+id: qwen3-4b-instruct-basic_arith-cispo-fp8-rollout-8x4
+parent: qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4
+
+model:
+  name: Qwen/Qwen3-4B-Instruct-2507
+  snapshot: cdbee75f17c01a7cc42f958dc650907174af0554
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554
+  max_total_sequence_length: 4096
+
+dataset:
+  family: nemo_gym
+  source: nvidia/Nemotron-RL-ReasoningGym-v1
+  subset: basic_arithmetic
+  local_jsonl: examples/datasets/basic_arithmetic_curated.jsonl
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: cispo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 1
+  temperature: 1.0
+  top_p: 1.0
+
+precision:
+  train: bfloat16
+  rollout_backend: vllm
+  rollout: fp8
+  kv_cache_dtype: auto
+
+# Same DGX Spark unified-memory correction as the GRPO baseline spec: 0.5
+# leaves headroom for Ray/Polar/host overhead sharing the box with vLLM.
+vllm_runtime:
+  gpu_memory_utilization: 0.5
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  max_num_seqs: 256

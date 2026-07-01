@@ -123,3 +123,6 @@ docs/
 # Dashboard frontend build artifacts
 web/node_modules/
 web/dist/
+
+# Experiment-as-code lineage/launch output (regeneratable via experiment.cli launch)
+runs/
