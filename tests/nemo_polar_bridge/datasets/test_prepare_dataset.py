@@ -3,13 +3,16 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from nemo_polar_bridge.datasets.base import TaskSpec
+from nemo_polar_bridge.datasets.data_loader import NeMoGymDatasetAdapter
 from nemo_polar_bridge.datasets.prepare_dataset import (
     FINAL_ANSWER_INSTRUCTION,
     apply_answer_format,
     build_attempt_matrix,
     build_task_template,
+    _build_adapter,
     _summarize_task_provenance,
 )
+from nemo_polar_bridge.datasets.reasoning_gym_adapter import ReasoningGymDatasetAdapter
 from nemo_polar_bridge.datasets.run_matrix import RunMatrixCell
 
 
@@ -167,6 +170,36 @@ def test_apply_final_answer_format_appends_to_string_input_once() -> None:
 
     assert formatted.responses_create_params["input"].endswith(FINAL_ANSWER_INSTRUCTION)
     assert formatted_again.responses_create_params["input"].count(FINAL_ANSWER_INSTRUCTION) == 1
+
+
+def test_build_adapter_defaults_to_nemo_gym() -> None:
+    args = SimpleNamespace(
+        dataset_family="nemo_gym",
+        dataset_id="nvidia/Nemotron-RL-ReasoningGym-v1",
+        config="default",
+        split="train",
+        local_jsonl=None,
+        source_dataset=[],
+    )
+    adapter = _build_adapter(args)
+    assert isinstance(adapter, NeMoGymDatasetAdapter)
+
+
+def test_build_adapter_selects_reasoning_gym() -> None:
+    args = SimpleNamespace(
+        dataset_family="reasoning_gym",
+        dataset_id="ignored-for-reasoning-gym",
+        config="default",
+        split="train",
+        local_jsonl=None,
+        source_dataset=[],
+        reasoning_gym_task_name="basic_arithmetic",
+        reasoning_gym_seed=7,
+    )
+    adapter = _build_adapter(args)
+    assert isinstance(adapter, ReasoningGymDatasetAdapter)
+    assert adapter.task_name == "basic_arithmetic"
+    assert adapter.seed == 7
 
 
 def test_summarize_task_provenance_carries_materials_hashes() -> None:

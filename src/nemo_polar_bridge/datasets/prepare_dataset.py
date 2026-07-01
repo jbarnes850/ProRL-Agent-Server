@@ -9,11 +9,12 @@ from pathlib import Path
 import textwrap
 from typing import Any
 
-from nemo_polar_bridge.datasets.base import TaskSpec
+from nemo_polar_bridge.datasets.base import DatasetAdapter, TaskSpec
 from nemo_polar_bridge.datasets.data_loader import (
     DEFAULT_NEMO_GYM_DATASET_ID,
     NeMoGymDatasetAdapter,
 )
+from nemo_polar_bridge.datasets.reasoning_gym_adapter import ReasoningGymDatasetAdapter
 from nemo_polar_bridge.datasets.run_matrix import RunMatrixCell, build_run_matrix_cell
 from nemo_polar_bridge.datasets.verifiers import portable_verifier_source
 
@@ -547,6 +548,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--matrix-name", default="smoke")
     parser.add_argument("--matrix-cell", default="")
     parser.add_argument("--dataset-family", default="nemo_gym")
+    parser.add_argument(
+        "--reasoning-gym-task-name",
+        default="basic_arithmetic",
+        help="reasoning-gym task name, only used when --dataset-family=reasoning_gym",
+    )
+    parser.add_argument(
+        "--reasoning-gym-seed",
+        type=int,
+        default=0,
+        help="reasoning_gym.create_dataset seed, only used when --dataset-family=reasoning_gym",
+    )
     parser.add_argument("--verifier-type", default="exact_answer")
     parser.add_argument("--execution-type", default="single_turn_chat")
     parser.add_argument("--difficulty-band", default="unspecified")
@@ -620,16 +632,27 @@ def _extract_prompt_text(value: Any) -> str:
     return str(value or "")
 
 
-def main() -> None:
-    args = parse_args()
-    output_dir = Path(args.output_dir)
-    adapter = NeMoGymDatasetAdapter(
+def _build_adapter(args: argparse.Namespace) -> DatasetAdapter:
+    if args.dataset_family == "reasoning_gym":
+        return ReasoningGymDatasetAdapter(
+            task_name=args.reasoning_gym_task_name,
+            seed=args.reasoning_gym_seed,
+            split=args.split,
+            config=args.config,
+        )
+    return NeMoGymDatasetAdapter(
         dataset_id=args.dataset_id,
         config=args.config,
         split=args.split,
         local_jsonl=args.local_jsonl,
         source_datasets=args.source_dataset,
     )
+
+
+def main() -> None:
+    args = parse_args()
+    output_dir = Path(args.output_dir)
+    adapter = _build_adapter(args)
     tasks = apply_answer_format(
         adapter.load_tasks(limit=args.limit, scan_rows=args.scan_rows),
         args.answer_format,
