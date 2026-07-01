@@ -1,0 +1,50 @@
+# NeMo Gym integration Phase 4: reasoning-gym sibling of Phase 4 cell 6
+# scale-up confirmation
+# (qwen3-4b-instruct-basic_arith-grpo-bf16-rollout-8x4-scaleup3step). Winning
+# config (bf16 rollout, grpo, gpu_memory_utilization=0.5), 3 steps, only the
+# dataset source changes -- confirms the sustained throughput profile holds
+# with the real reasoning-gym dependency instead of the HF-exported dataset.
+#
+# Validate (no GPU) inside the image before launching:
+#   python scripts/experiment/validate_against_nemo_loader.py \
+#     examples/experiments/qwen3-4b-instruct-basic_arith-grpo-bf16-rollout-8x4-scaleup3step-reasoning-gym.yaml
+id: qwen3-4b-instruct-basic_arith-grpo-bf16-rollout-8x4-scaleup3step-reasoning-gym
+parent: qwen3-4b-instruct-basic_arith-grpo-bf16-rollout-8x4-scaleup3step
+
+model:
+  name: Qwen/Qwen3-4B-Instruct-2507
+  snapshot: cdbee75f17c01a7cc42f958dc650907174af0554
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554
+  max_total_sequence_length: 4096
+
+dataset:
+  family: reasoning_gym
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: grpo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 3
+  temperature: 1.0
+  top_p: 1.0
+
+precision:
+  train: bfloat16
+  rollout_backend: vllm
+  rollout: bfloat16
+  kv_cache_dtype: auto
+
+vllm_runtime:
+  gpu_memory_utilization: 0.5
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  max_num_seqs: 256

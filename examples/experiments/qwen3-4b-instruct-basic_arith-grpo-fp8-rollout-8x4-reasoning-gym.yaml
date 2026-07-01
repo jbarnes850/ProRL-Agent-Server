@@ -1,0 +1,52 @@
+# NeMo Gym integration Phase 4 (per
+# docs/goals/2026-06-30-nemo-gym-reasoning-integration-rider.md): reasoning-gym
+# sibling of Phase 4 cell 1 baseline
+# (qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4). Only the dataset
+# source changes (nvidia/Nemotron-RL-ReasoningGym-v1 HF export ->
+# ReasoningGymDatasetAdapter's live reasoning-gym dependency); model,
+# algorithm, precision, and vllm_runtime are identical so the sibling isolates
+# the dataset-source effect on throughput.
+#
+# Validate (no GPU) inside the image before launching:
+#   python scripts/experiment/validate_against_nemo_loader.py \
+#     examples/experiments/qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4-reasoning-gym.yaml
+id: qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4-reasoning-gym
+parent: qwen3-4b-instruct-basic_arith-grpo-fp8-rollout-8x4
+
+model:
+  name: Qwen/Qwen3-4B-Instruct-2507
+  snapshot: cdbee75f17c01a7cc42f958dc650907174af0554
+  nemo_path: /host-hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554
+  max_total_sequence_length: 4096
+
+dataset:
+  family: reasoning_gym
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: grpo
+
+async_grpo:
+  lag: 1
+
+rollout:
+  prompts_per_step: 8
+  generations_per_prompt: 4
+  max_steps: 1
+  temperature: 1.0
+  top_p: 1.0
+
+precision:
+  train: bfloat16
+  rollout_backend: vllm
+  rollout: fp8
+  kv_cache_dtype: auto
+
+vllm_runtime:
+  gpu_memory_utilization: 0.5
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  max_num_seqs: 256
