@@ -525,6 +525,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-host", default="")
     parser.add_argument("--head-ip", default="")
     parser.add_argument("--worker-ip", default="")
+    parser.add_argument("--head-hostname", default="spark-f7e2")
+    parser.add_argument("--worker-hostname", default="spark-cfd0")
     parser.add_argument("--polar-rollout-port", type=int, default=19080)
     parser.add_argument("--polar-gateway-port", type=int, default=19100)
     parser.add_argument("--vllm-http-port", type=int, default=31000)
@@ -537,6 +539,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--answer-format", choices=("none", "final_answer"), default="none")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.35)
     parser.add_argument("--vllm-enforce-eager", default="true")
+    parser.add_argument("--vllm-precision", default="bfloat16")
+    parser.add_argument("--vllm-kv-cache-dtype", default="auto")
     parser.add_argument("--vllm-max-num-seqs", type=int)
     parser.add_argument("--vllm-max-num-batched-tokens", type=int)
     parser.add_argument("--script-path", default="")
@@ -679,6 +683,8 @@ def main() -> None:
                 "top_k": None,
                 "vllm_generation_config": "vllm",
                 "vllm_runtime": {
+                    "precision": args.vllm_precision,
+                    "kv_cache_dtype": args.vllm_kv_cache_dtype,
                     "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
                     "enforce_eager": args.vllm_enforce_eager,
                     "max_num_seqs": args.vllm_max_num_seqs,
@@ -697,9 +703,9 @@ def main() -> None:
             "run_dir": str(output_dir),
             "script_path": args.script_path,
             "topology": {
-                "train_node": "spark-cfd0",
+                "train_node": args.worker_hostname,
                 "train_ip": args.worker_ip,
-                "inference_rollout_node": "spark-f7e2",
+                "inference_rollout_node": args.head_hostname,
                 "inference_rollout_ip": args.head_ip,
             },
         },

@@ -6,6 +6,9 @@ IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
 WORKER_IP="${WORKER_IP:-192.168.100.11}"
 WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
+HEAD_HOSTNAME="${HEAD_HOSTNAME:-spark-f7e2}"
+WORKER_HOSTNAME="${WORKER_HOSTNAME:-spark-cfd0}"
+NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp1s0f1np1}"
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 STAMP="${1:-$(date +%Y%m%d-%H%M%S)}"
@@ -22,9 +25,9 @@ echo "image=${IMAGE}"
 mkdir -p "${RUN_DIR}"/{data,logs,ray-head,tmp,hf}
 ssh "${WORKER_SSH}" "mkdir -p '${RUN_DIR}'/{data,logs,ray-worker,tmp,hf}"
 
-cat > "${RUN_DIR}/nccl.conf" <<'EOF'
+cat > "${RUN_DIR}/nccl.conf" <<EOF
 NCCL_IB_DISABLE=1
-NCCL_SOCKET_IFNAME=enp1s0f1np1
+NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
 NCCL_SOCKET_FAMILY=AF_INET
 NCCL_NET=Socket
 NCCL_NET_PLUGIN=none
@@ -48,13 +51,13 @@ COMMON_ENV=(
   -e NVIDIA_VISIBLE_DEVICES=all
   -e CUDA_VISIBLE_DEVICES=0
   -e NCCL_IB_DISABLE=1
-  -e NCCL_SOCKET_IFNAME=enp1s0f1np1
+  -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
   -e NCCL_SOCKET_FAMILY=AF_INET
   -e NCCL_NET=Socket
   -e NCCL_NET_PLUGIN=none
   -e NCCL_DEBUG=INFO
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV
-  -e GLOO_SOCKET_IFNAME=enp1s0f1np1
+  -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05
   -e PYTHONUNBUFFERED=1
   -e HF_HOME=/work/hf
@@ -86,13 +89,13 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NVIDIA_VISIBLE_DEVICES=all \
   -e CUDA_VISIBLE_DEVICES=0 \
   -e NCCL_IB_DISABLE=1 \
-  -e NCCL_SOCKET_IFNAME=enp1s0f1np1 \
+  -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NCCL_SOCKET_FAMILY=AF_INET \
   -e NCCL_NET=Socket \
   -e NCCL_NET_PLUGIN=none \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
-  -e GLOO_SOCKET_IFNAME=enp1s0f1np1 \
+  -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05 \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/work/hf \
@@ -182,7 +185,7 @@ for node in [node for node in ray.nodes() if node.get('Alive')]:
 print(json.dumps(results, sort_keys=True))
 expected = {
     'NCCL_IB_DISABLE': '1',
-    'NCCL_SOCKET_IFNAME': 'enp1s0f1np1',
+    'NCCL_SOCKET_IFNAME': '${NCCL_SOCKET_IFNAME}',
     'NCCL_SOCKET_FAMILY': 'AF_INET',
     'NCCL_NET': 'Socket',
     'NCCL_NET_PLUGIN': 'none',
@@ -200,13 +203,13 @@ docker exec \
   -e RAY_ADDRESS="${HEAD_IP}:6379" \
   -e CUDA_VISIBLE_DEVICES=0 \
   -e NCCL_IB_DISABLE=1 \
-  -e NCCL_SOCKET_IFNAME=enp1s0f1np1 \
+  -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NCCL_SOCKET_FAMILY=AF_INET \
   -e NCCL_NET=Socket \
   -e NCCL_NET_PLUGIN=none \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
-  -e GLOO_SOCKET_IFNAME=enp1s0f1np1 \
+  -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05 \
   -e PYTHONUNBUFFERED=1 \
   -e NEMO_RL_NVML_MEM_GET_INFO_FALLBACK=1 \
@@ -293,13 +296,15 @@ for pattern in \
   fi
 done
 
-if ! HEAD_IP="${HEAD_IP}" WORKER_IP="${WORKER_IP}" LOG_PATH="${RUN_DIR}/logs/grpo-nemo-async.log" python3 - <<'PY' | tee -a "${RUN_DIR}/logs/exit-code.log"; then
+if ! HEAD_IP="${HEAD_IP}" WORKER_IP="${WORKER_IP}" HEAD_HOSTNAME="${HEAD_HOSTNAME}" WORKER_HOSTNAME="${WORKER_HOSTNAME}" LOG_PATH="${RUN_DIR}/logs/grpo-nemo-async.log" python3 - <<'PY' | tee -a "${RUN_DIR}/logs/exit-code.log"; then
 import os
 import re
 import sys
 
 head_ip = os.environ["HEAD_IP"]
 worker_ip = os.environ["WORKER_IP"]
+head_hostname = os.environ["HEAD_HOSTNAME"]
+worker_hostname = os.environ["WORKER_HOSTNAME"]
 valid_ips = {head_ip, worker_ip}
 text = open(os.environ["LOG_PATH"], encoding="utf-8", errors="replace").read()
 
@@ -311,15 +316,15 @@ for ip in valid_ips:
         policy_ips.add(ip)
     if re.search(rf"DTensorPolicyWorkerV2[^\n]*NET/Socket : Using .*:{re.escape(ip)}<", text):
         policy_ips.add(ip)
-    if re.search(rf"DTensorPolicyWorkerV2[^\n]*spark-f7e2:", text) and ip == head_ip:
+    if re.search(rf"DTensorPolicyWorkerV2[^\n]*{re.escape(head_hostname)}:", text) and ip == head_ip:
         policy_ips.add(ip)
-    if re.search(rf"DTensorPolicyWorkerV2[^\n]*spark-cfd0:", text) and ip == worker_ip:
+    if re.search(rf"DTensorPolicyWorkerV2[^\n]*{re.escape(worker_hostname)}:", text) and ip == worker_ip:
         policy_ips.add(ip)
     if re.search(rf"VllmAsyncGenerationWorker[^\n]*NET/Socket : Using .*:{re.escape(ip)}<", text):
         vllm_ips.add(ip)
-    if re.search(rf"VllmAsyncGenerationWorker[^\n]*spark-f7e2:", text) and ip == head_ip:
+    if re.search(rf"VllmAsyncGenerationWorker[^\n]*{re.escape(head_hostname)}:", text) and ip == head_ip:
         vllm_ips.add(ip)
-    if re.search(rf"VllmAsyncGenerationWorker[^\n]*spark-cfd0:", text) and ip == worker_ip:
+    if re.search(rf"VllmAsyncGenerationWorker[^\n]*{re.escape(worker_hostname)}:", text) and ip == worker_ip:
         vllm_ips.add(ip)
 
 print(f"topology_policy_ips={','.join(sorted(policy_ips)) or 'missing'}")

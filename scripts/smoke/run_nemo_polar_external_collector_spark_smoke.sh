@@ -6,6 +6,9 @@ IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
 WORKER_IP="${WORKER_IP:-192.168.100.11}"
 WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
+HEAD_HOSTNAME="${HEAD_HOSTNAME:-spark-f7e2}"
+WORKER_HOSTNAME="${WORKER_HOSTNAME:-spark-cfd0}"
+NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp1s0f1np1}"
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_MOUNT_HOST="${MODEL_MOUNT_HOST:-}"
@@ -51,6 +54,8 @@ POLAR_MODEL_TEMPERATURE="${POLAR_MODEL_TEMPERATURE:-0.6}"
 POLAR_MODEL_TOP_P="${POLAR_MODEL_TOP_P:-1.0}"
 NEMO_VLLM_GPU_MEMORY_UTILIZATION="${NEMO_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
 NEMO_VLLM_ENFORCE_EAGER="${NEMO_VLLM_ENFORCE_EAGER:-true}"
+NEMO_VLLM_PRECISION="${NEMO_VLLM_PRECISION:-bfloat16}"
+NEMO_VLLM_KV_CACHE_DTYPE="${NEMO_VLLM_KV_CACHE_DTYPE:-auto}"
 NEMO_VLLM_MAX_NUM_SEQS="${NEMO_VLLM_MAX_NUM_SEQS:-}"
 NEMO_VLLM_MAX_NUM_BATCHED_TOKENS="${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS:-}"
 NEMO_GRPO_NUM_PROMPTS_PER_STEP="${NEMO_GRPO_NUM_PROMPTS_PER_STEP:-1}"
@@ -161,9 +166,9 @@ rsync -az --delete \
   --exclude "tmp" \
   "${REPO_HOST}/" "${WORKER_SSH}:${REPO_HOST}/"
 
-cat > "${RUN_DIR}/nccl.conf" <<'EOF'
+cat > "${RUN_DIR}/nccl.conf" <<EOF
 NCCL_IB_DISABLE=1
-NCCL_SOCKET_IFNAME=enp1s0f1np1
+NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
 NCCL_SOCKET_FAMILY=AF_INET
 NCCL_NET=Socket
 NCCL_NET_PLUGIN=none
@@ -194,6 +199,8 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
   PREPARE_VLLM_ARGS=(
     --vllm-gpu-memory-utilization "${NEMO_VLLM_GPU_MEMORY_UTILIZATION}"
     --vllm-enforce-eager "${NEMO_VLLM_ENFORCE_EAGER}"
+    --vllm-precision "${NEMO_VLLM_PRECISION}"
+    --vllm-kv-cache-dtype "${NEMO_VLLM_KV_CACHE_DTYPE}"
   )
   if [[ -n "${NEMO_VLLM_MAX_NUM_SEQS}" ]]; then
     PREPARE_VLLM_ARGS+=(--vllm-max-num-seqs "${NEMO_VLLM_MAX_NUM_SEQS}")
@@ -220,6 +227,8 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
     --nemo-rl-ref "${NEMO_RL_REF}" \
     --head-ip "${HEAD_IP}" \
     --worker-ip "${WORKER_IP}" \
+    --head-hostname "${HEAD_HOSTNAME}" \
+    --worker-hostname "${WORKER_HOSTNAME}" \
     --polar-rollout-port "${POLAR_ROLLOUT_PORT}" \
     --polar-gateway-port "${POLAR_GATEWAY_PORT}" \
     --vllm-http-port "${VLLM_HTTP_PORT}" \
@@ -381,13 +390,13 @@ COMMON_ENV=(
   -e NVIDIA_VISIBLE_DEVICES=all
   -e CUDA_VISIBLE_DEVICES=0
   -e NCCL_IB_DISABLE=1
-  -e NCCL_SOCKET_IFNAME=enp1s0f1np1
+  -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
   -e NCCL_SOCKET_FAMILY=AF_INET
   -e NCCL_NET=Socket
   -e NCCL_NET_PLUGIN=none
   -e NCCL_DEBUG=INFO
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV
-  -e GLOO_SOCKET_IFNAME=enp1s0f1np1
+  -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05
   -e PYTHONUNBUFFERED=1
   -e HF_HOME=/work/hf
@@ -441,13 +450,13 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NVIDIA_VISIBLE_DEVICES=all \
   -e CUDA_VISIBLE_DEVICES=0 \
   -e NCCL_IB_DISABLE=1 \
-  -e NCCL_SOCKET_IFNAME=enp1s0f1np1 \
+  -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NCCL_SOCKET_FAMILY=AF_INET \
   -e NCCL_NET=Socket \
   -e NCCL_NET_PLUGIN=none \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
-  -e GLOO_SOCKET_IFNAME=enp1s0f1np1 \
+  -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05 \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/work/hf \
@@ -492,6 +501,8 @@ PY" | tee "${RUN_DIR}/logs/ray-resources.log"
 VLLM_HYDRA_OVERRIDES=(
   "policy.generation.vllm_cfg.gpu_memory_utilization=${NEMO_VLLM_GPU_MEMORY_UTILIZATION}"
   "policy.generation.vllm_cfg.enforce_eager=${NEMO_VLLM_ENFORCE_EAGER}"
+  "policy.generation.vllm_cfg.precision=${NEMO_VLLM_PRECISION}"
+  "policy.generation.vllm_cfg.kv_cache_dtype=${NEMO_VLLM_KV_CACHE_DTYPE}"
 )
 if [[ -n "${NEMO_VLLM_MAX_NUM_SEQS}" ]]; then
   VLLM_HYDRA_OVERRIDES+=("++policy.generation.vllm_cfg.max_num_seqs=${NEMO_VLLM_MAX_NUM_SEQS}")
@@ -508,13 +519,13 @@ docker exec \
   -e RAY_ADDRESS="${HEAD_IP}:6379" \
   -e CUDA_VISIBLE_DEVICES=0 \
   -e NCCL_IB_DISABLE=1 \
-  -e NCCL_SOCKET_IFNAME=enp1s0f1np1 \
+  -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NCCL_SOCKET_FAMILY=AF_INET \
   -e NCCL_NET=Socket \
   -e NCCL_NET_PLUGIN=none \
   -e NCCL_DEBUG=INFO \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
-  -e GLOO_SOCKET_IFNAME=enp1s0f1np1 \
+  -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=0.05 \
   -e PYTHONUNBUFFERED=1 \
   -e PYTHONPATH=/work/ProRL-Agent-Server/src:/opt/nemo-rl \
