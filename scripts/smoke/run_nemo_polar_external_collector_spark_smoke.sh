@@ -227,6 +227,7 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
   if [[ -x "${REPO_HOST}/.venv/bin/python3" ]]; then
     PREPARE_DATASET_PYTHON="${REPO_HOST}/.venv/bin/python3"
   fi
+  echo "prepare_dataset interpreter: ${PREPARE_DATASET_PYTHON}"
   PYTHONPATH="${REPO_HOST}/src${PYTHONPATH:+:${PYTHONPATH}}" \
   "${PREPARE_DATASET_PYTHON}" -m nemo_polar_bridge.datasets.prepare_dataset \
     --dataset-id "${POLAR_DATASET_ID}" \

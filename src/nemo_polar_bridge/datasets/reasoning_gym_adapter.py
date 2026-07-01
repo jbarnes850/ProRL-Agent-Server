@@ -92,18 +92,30 @@ class ReasoningGymDatasetAdapter(DatasetAdapter):
         if scan_rows <= 0:
             raise ValueError("scan_rows must be positive")
 
-        dataset = reasoning_gym.create_dataset(
-            self.task_name,
-            size=scan_rows,
-            seed=self.seed,
-            **self.task_kwargs,
-        )
+        try:
+            dataset = reasoning_gym.create_dataset(
+                self.task_name,
+                size=scan_rows,
+                seed=self.seed,
+                **self.task_kwargs,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"reasoning_gym.create_dataset failed for task_name={self.task_name!r} "
+                f"seed={self.seed!r} task_kwargs={self.task_kwargs!r}: {exc}"
+            ) from exc
 
         inspected_rows: list[dict[str, Any]] = []
         tasks: list[TaskSpec] = []
         skipped = 0
         for row_idx in range(scan_rows):
-            item = dataset[row_idx]
+            try:
+                item = dataset[row_idx]
+            except Exception as exc:
+                raise RuntimeError(
+                    f"reasoning_gym dataset row generation failed for "
+                    f"task_name={self.task_name!r} seed={self.seed!r} row_idx={row_idx!r}: {exc}"
+                ) from exc
             inspected_rows.append({"row_idx": row_idx, "item": item})
             task = task_from_reasoning_gym_item(
                 item,

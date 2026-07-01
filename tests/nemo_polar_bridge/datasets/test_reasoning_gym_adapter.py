@@ -212,6 +212,42 @@ def test_load_tasks_rejects_non_positive_limit_or_scan_rows() -> None:
         adapter.load_tasks(limit=5, scan_rows=0)
 
 
+def test_load_tasks_wraps_create_dataset_failure_with_context() -> None:
+    # An unregistered task name (typo, or an invalid task_kwargs combination
+    # reasoning_gym validates eagerly, e.g. max_terms < min_terms) previously
+    # propagated as a bare, context-free exception straight out of
+    # reasoning_gym.create_dataset.
+    adapter = ReasoningGymDatasetAdapter(task_name="nonexistent_task_xyz", seed=SEED)
+
+    with pytest.raises(RuntimeError, match="nonexistent_task_xyz") as exc_info:
+        adapter.load_tasks(limit=1, scan_rows=1)
+
+    assert "seed" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_load_tasks_wraps_row_generation_failure_with_context(monkeypatch) -> None:
+    # reasoning_gym's basic_arithmetic validates all task_kwargs eagerly at
+    # create_dataset time, so a genuine per-row failure isn't reachable
+    # through it -- other reasoning_gym tasks generate lazily per item, so
+    # this call site needs its own coverage via a fake dataset object.
+    adapter = ReasoningGymDatasetAdapter(seed=SEED)
+
+    class _ExplodingDataset:
+        def __getitem__(self, row_idx: int) -> dict:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "nemo_polar_bridge.datasets.reasoning_gym_adapter.reasoning_gym.create_dataset",
+        lambda *args, **kwargs: _ExplodingDataset(),
+    )
+
+    with pytest.raises(RuntimeError, match="row_idx") as exc_info:
+        adapter.load_tasks(limit=1, scan_rows=1)
+
+    assert exc_info.value.__cause__ is not None
+
+
 def test_scan_rows_does_not_change_which_items_are_selected() -> None:
     # Per-item generation in reasoning-gym is keyed off (seed, idx) only, not the
     # configured dataset `size` -- verified live: create_dataset(size=5, seed=42)[i]
