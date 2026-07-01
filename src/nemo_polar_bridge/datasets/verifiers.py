@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 from typing import Any
 
 from nemo_polar_bridge.datasets.base import TaskSpec, VerifierResult
@@ -48,6 +49,90 @@ def strip_code_fence(value: str) -> str:
         if len(lines) >= 2 and lines[-1].strip() == "```":
             return "\n".join(lines[1:-1]).strip()
     return value
+
+
+def extract_shell_command(completion: str) -> str:
+    """Pull a single shell command out of a model completion.
+
+    Execution-based analogue of :func:`extract_candidate_answer`: for shell
+    tasks the model's answer is a command to *run*, not text to compare. Prefer
+    the contents of the first fenced code block (```` ```bash ... ``` ````);
+    otherwise fall back to the fence-stripped body. Comment-only lines are
+    dropped so a stray ``# explanation`` does not become the command.
+    """
+
+    text = str(completion or "")
+    match = re.search(r"```[A-Za-z0-9_-]*\n(.*?)```", text, re.DOTALL)
+    block = match.group(1).strip() if match else strip_code_fence(text).strip()
+    lines = [
+        line
+        for line in block.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return "\n".join(lines).strip() if lines else block.strip()
+
+
+def grade_shell_command_execution(
+    completion: str,
+    expected_stdout: str,
+    *,
+    cwd: str | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Execute the model's proposed shell command and score by its stdout.
+
+    Reward is 1.0 iff the extracted command exits 0 and its stdout, stripped,
+    equals the expected stdout, stripped. This scores by *running* the command
+    in a sandbox, not by string-matching the command text -- the whole point of
+    the shell-harness task type. Returns the portable dict shape the Polar
+    ``verifier_result_file`` evaluator consumes (``reward``/``passed``/...).
+    """
+
+    command = extract_shell_command(completion)
+    expected = str(expected_stdout or "").strip()
+    result: dict[str, Any] = {
+        "passed": False,
+        "reward": 0.0,
+        "reason": "shell_exec_no_command",
+        "normalized_completion": command,
+        "normalized_answer": expected,
+        "metadata": {"verifier": "shell_command_exec"},
+    }
+    if not command:
+        return result
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        result["reason"] = "shell_exec_timeout"
+        result["metadata"]["timeout_seconds"] = timeout
+        return result
+    except Exception as exc:  # pragma: no cover - defensive
+        result["reason"] = "shell_exec_error"
+        result["metadata"]["error"] = str(exc)
+        return result
+    actual = str(proc.stdout or "").strip()
+    result["metadata"].update(
+        {
+            "returncode": proc.returncode,
+            "command": command[:2000],
+            "actual_stdout": actual[:2000],
+            "stderr": str(proc.stderr or "")[:1000],
+        }
+    )
+    if proc.returncode == 0 and actual == expected:
+        result.update({"passed": True, "reward": 1.0, "reason": "shell_exec_match"})
+    elif proc.returncode != 0:
+        result["reason"] = "shell_exec_nonzero_exit"
+    else:
+        result["reason"] = "shell_exec_stdout_mismatch"
+    return result
 
 
 def verify_completion(completion: str, task: TaskSpec) -> VerifierResult:

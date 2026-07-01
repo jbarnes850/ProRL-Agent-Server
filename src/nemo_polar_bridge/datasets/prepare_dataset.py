@@ -24,6 +24,11 @@ FINAL_ANSWER_INSTRUCTION = (
     "final result and nothing else."
 )
 MULTI_TURN_EXECUTION_TYPES = {"multi_turn_chat_tool", "multi_step_chat_tool"}
+# Shell-harness task type: the model proposes a shell command, the sandbox runs
+# it, and reward comes from the command's actual stdout, not from string-matching
+# the command text. Selected by execution_type so it reuses the nemo_gym adapter
+# + the existing Polar ShellHarness/verifier_result_file path with no new harness.
+SHELL_EXEC_EXECUTION_TYPES = {"shell_command_exec"}
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -44,20 +49,33 @@ def build_task_template(
     run_matrix: RunMatrixCell | None = None,
 ) -> dict[str, Any]:
     execution_type = str(getattr(args, "execution_type", "single_turn_chat") or "single_turn_chat")
+    shell_exec = execution_type in SHELL_EXEC_EXECUTION_TYPES
     multi_turn = execution_type in MULTI_TURN_EXECUTION_TYPES
-    command = _build_multi_turn_agent_command(args) if multi_turn else _build_agent_command(args)
+    if shell_exec:
+        command = _build_shell_exec_agent_command(args)
+        instruction = (
+            "Read a shell task, propose a single shell command, and score it by "
+            "executing the command in the sandbox and comparing its stdout to the "
+            "expected output."
+        )
+    elif multi_turn:
+        command = _build_multi_turn_agent_command(args)
+        instruction = (
+            "Run a multi-turn NeMo Gym-shaped task row through live model calls "
+            "and score the final episode with the task verifier."
+        )
+    else:
+        command = _build_agent_command(args)
+        instruction = (
+            "Sample one live model completion from a NeMo Gym-shaped task row "
+            "and score it with the task verifier."
+        )
     return {
         "task_id": (
             "nemo-polar-dataset-{weight_version}-{target_weight_version}-"
             "{group_id}-{attempt_index}-{name}"
         ),
-        "instruction": (
-            "Run a multi-turn NeMo Gym-shaped task row through live model calls "
-            "and score the final episode with the task verifier."
-            if multi_turn
-            else "Sample one live model completion from a NeMo Gym-shaped task row "
-            "and score it with the task verifier."
-        ),
+        "instruction": instruction,
         "timeout_seconds": args.task_timeout_seconds,
         "runtime": {
             "backend": "docker",
@@ -266,6 +284,182 @@ result = verify_task(
     data,
     os.environ.get("POLAR_MODEL_NAME", {args.model_name!r}),
 )
+(workspace / "model_response.txt").write_text(str(content))
+(workspace / "verifier_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+(workspace / "dataset_task_metadata.json").write_text(json.dumps(task, indent=2, sort_keys=True))
+(artifacts / "llm_probe.json").write_text(json.dumps(data, indent=2, sort_keys=True))
+(artifacts / "verifier_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+PY"""
+
+
+def _build_shell_exec_agent_command(args: argparse.Namespace) -> str:
+    """Heredoc for the shell-harness task type.
+
+    Calls the model once (identical to the single-turn path), extracts a single
+    shell command from the completion, runs it in the sandbox workspace, and
+    scores reward from the command's actual exit code + stdout vs. the task's
+    expected stdout. Self-contained: the runtime image does not have
+    nemo_polar_bridge installed, so the grader is inlined here (a mirror of
+    verifiers.grade_shell_command_execution, unit-tested host-side).
+    """
+
+    return f"""python3 - <<'PY'
+import json
+import os
+import subprocess
+import urllib.request
+from pathlib import Path
+
+
+def normalize_messages(value):
+    if isinstance(value, str):
+        return [{{"role": "user", "content": value}}]
+    if isinstance(value, list):
+        messages = []
+        for message in value:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user")
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, sort_keys=True)
+            messages.append({{"role": role, "content": content}})
+        if messages:
+            return messages
+    return [{{"role": "user", "content": str(value or "")}}]
+
+
+def model_request_params(responses_create_params):
+    params = {{}}
+    for key, value in responses_create_params.items():
+        if key == "input":
+            continue
+        if key == "top_k" and value not in (None, -1):
+            continue
+        if key in ("tools", "tool_choice") and value in (None, [], {{}}):
+            continue
+        params[key] = value
+    return params
+
+
+def load_task(payload_task):
+    raw = os.environ.get("POLAR_ORIGINAL_TASK_SPEC_JSON")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and isinstance(
+                parsed.get("responses_create_params"), dict
+            ):
+                return parsed
+        except Exception:
+            pass
+    return payload_task
+
+
+def extract_shell_command(completion):
+    text = str(completion or "").strip()
+    lines = text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            start = i
+            break
+    if start is not None:
+        body = []
+        for line in lines[start + 1:]:
+            if line.lstrip().startswith("```"):
+                break
+            body.append(line)
+        block_lines = body
+    else:
+        block_lines = lines
+    cmd_lines = [
+        line
+        for line in block_lines
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return chr(10).join(cmd_lines).strip() if cmd_lines else text
+
+
+def grade_shell(completion, expected_stdout, cwd, timeout):
+    command = extract_shell_command(completion)
+    expected = str(expected_stdout or "").strip()
+    result = {{
+        "passed": False,
+        "reward": 0.0,
+        "reason": "shell_exec_no_command",
+        "normalized_completion": command,
+        "normalized_answer": expected,
+        "metadata": {{"verifier": "shell_command_exec"}},
+    }}
+    if not command:
+        return result
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        result["reason"] = "shell_exec_timeout"
+        return result
+    except Exception as exc:
+        result["reason"] = "shell_exec_error"
+        result["metadata"]["error"] = str(exc)
+        return result
+    actual = str(proc.stdout or "").strip()
+    result["metadata"].update({{
+        "returncode": proc.returncode,
+        "command": command[:2000],
+        "actual_stdout": actual[:2000],
+        "stderr": str(proc.stderr or "")[:1000],
+    }})
+    if proc.returncode == 0 and actual == expected:
+        result.update(
+            {{"passed": True, "reward": 1.0, "reason": "shell_exec_match"}}
+        )
+    elif proc.returncode != 0:
+        result["reason"] = "shell_exec_nonzero_exit"
+    else:
+        result["reason"] = "shell_exec_stdout_mismatch"
+    return result
+
+
+artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/polar/session/artifacts"))
+artifacts.mkdir(parents=True, exist_ok=True)
+workspace = Path("/polar/session/workspace")
+workspace.mkdir(parents=True, exist_ok=True)
+
+payload_task = json.loads(os.environ["POLAR_TASK_SPEC_JSON"])
+task = load_task(payload_task)
+responses_create_params = dict(task.get("responses_create_params") or {{}})
+messages = normalize_messages(responses_create_params.get("input"))
+payload = {{
+    **model_request_params(responses_create_params),
+    "model": os.environ.get("POLAR_MODEL_NAME", {args.model_name!r}),
+    "messages": messages,
+    "max_tokens": int(os.environ.get("POLAR_MODEL_MAX_TOKENS", "{args.model_max_tokens}")),
+    "temperature": float(os.environ.get("POLAR_MODEL_TEMPERATURE", "{args.model_temperature}")),
+    "top_p": float(os.environ.get("POLAR_MODEL_TOP_P", "{args.model_top_p}")),
+}}
+base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+req = urllib.request.Request(
+    base + "/chat/completions",
+    data=json.dumps(payload).encode(),
+    headers={{
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + os.environ["OPENAI_API_KEY"],
+    }},
+    method="POST",
+)
+with urllib.request.urlopen(req, timeout={int(args.model_request_timeout_seconds)}) as resp:
+    data = json.loads(resp.read())
+
+content = data["choices"][0]["message"].get("content", "")
+result = grade_shell(content, task.get("answer"), str(workspace), {int(args.test_timeout_seconds)})
 (workspace / "model_response.txt").write_text(str(content))
 (workspace / "verifier_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
 (workspace / "dataset_task_metadata.json").write_text(json.dumps(task, indent=2, sort_keys=True))
