@@ -13,8 +13,16 @@ set -uo pipefail
 
 NEMO_RL_REF="${NEMO_RL_REF:-c236061b250e97638722292ab8a54d5eb47ae00f}"
 IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
+# HEAD_SSH targets the Tailscale-routable "spark" alias, reachable directly
+# from the controller. WORKER_SSH must NOT default to the worker's LAN-only
+# IP (192.168.100.11) the way the smoke scripts' internal WORKER_SSH does --
+# those scripts run remotely on spark-f7e2, where that LAN IP is a direct
+# peer; this script runs on the controller, where only the worker's Tailscale
+# alias is routable (verified: direct 192.168.100.11 SSH times out from the
+# controller even though ping/ssh both succeed from spark-f7e2 to the same
+# address).
 HEAD_SSH="${HEAD_SSH:-spark}"
-WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
+WORKER_SSH="${WORKER_SSH:-spark-cfd0}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
 WORKER_IP="${WORKER_IP:-192.168.100.11}"
 HEAD_HOSTNAME="${HEAD_HOSTNAME:-spark-f7e2}"
