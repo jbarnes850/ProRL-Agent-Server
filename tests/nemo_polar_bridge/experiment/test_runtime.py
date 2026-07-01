@@ -86,7 +86,10 @@ def test_qwen3_4b_fp8_rollout_spec_maps_runtime_env():
     assert plan.env["POLAR_MODEL_NAME"] == "Qwen/Qwen3-4B-Instruct-2507"
     assert plan.env["NEMO_VLLM_PRECISION"] == "fp8"
     assert plan.env["NEMO_VLLM_KV_CACHE_DTYPE"] == "auto"
-    assert plan.env["NEMO_VLLM_GPU_MEMORY_UTILIZATION"] == "0.9"
+    # 0.5, not 0.9: DGX Spark's unified memory (CPU+GPU share ~119GB per host)
+    # OOMs at 0.9 with Ray/Polar/host overhead sharing the box (live-verified
+    # this session; see the spec file's own comment for the incident).
+    assert plan.env["NEMO_VLLM_GPU_MEMORY_UTILIZATION"] == "0.5"
     assert plan.env["NEMO_VLLM_ENFORCE_EAGER"] == "false"
     assert plan.env["NEMO_VLLM_MAX_NUM_BATCHED_TOKENS"] == "16384"
     assert plan.env["NEMO_VLLM_MAX_NUM_SEQS"] == "256"
