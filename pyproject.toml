@@ -30,6 +30,9 @@ swebench = [
     "swebench",
     "datasets",
 ]
+reasoning-gym = [
+    "reasoning-gym>=0.1.19",
+]
 
 [project.scripts]
 polar = "polar.cli:main"

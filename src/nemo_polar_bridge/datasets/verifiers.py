@@ -63,6 +63,8 @@ def verify_completion(completion: str, task: TaskSpec) -> VerifierResult:
     verifier_name = (task.verifier_name or "").casefold()
     if verifier_name == "materials_tensile_numeric":
         return _verify_materials_tensile_numeric(completion, task)
+    if verifier_name == "reasoning_gym_basic_arithmetic":
+        return _verify_reasoning_gym_basic_arithmetic(completion, task)
     if source == "calendar" or verifier_name == "calendar_gym":
         return _verify_calendar_gym(completion, task)
     if source == "cryptarithm":
@@ -199,6 +201,83 @@ def _redact_materials_answer(answer: dict[str, Any]) -> dict[str, Any]:
         "integrity_policy_id": answer.get("integrity_policy_id"),
         "dataset_hashes": answer.get("dataset_hashes") or {},
     }
+
+
+def _verify_reasoning_gym_basic_arithmetic(completion: str, task: TaskSpec) -> VerifierResult:
+    """Faithful port of reasoning-gym's default ``score_answer``.
+
+    Upstream source (verified live against reasoning-gym==0.1.25, PyPI, fetched
+    2026-06-30; also matches github.com/open-thought/reasoning-gym commit
+    49b07130b3fcd12f2d064bba7c43869543a0e7e7,
+    reasoning_gym/dataset.py lines 63-72):
+
+        def score_answer(self, answer: Optional[str], entry: dict[str, Any]) -> float:
+            \"\"\"Overwrite this method in derived classes if a single oracle answer
+            is not available.\"\"\"
+            oracle_answer = entry["answer"]
+            reward = 0.0
+            if isinstance(answer, str) and len(answer) > 0:
+                if answer == oracle_answer:
+                    reward = 1.0
+                elif oracle_answer in answer:
+                    reward = len(oracle_answer) / len(answer)
+            return reward
+
+    `reasoning_gym.arithmetic.basic_arithmetic.BasicArithmeticDataset` does not
+    override `score_answer` (confirmed live: `"score_answer" not in
+    BasicArithmeticDataset.__dict__`), so it inherits this exact
+    `ProceduralDataset.score_answer` implementation unmodified. The comparison
+    logic below (exact match -> reward 1.0; oracle substring-contained in the
+    candidate -> partial credit `len(oracle)/len(candidate)`; anything else,
+    including a None/empty candidate -> reward 0.0) is reproduced verbatim,
+    including the "somewhat naive" substring-containment behavior (e.g. an
+    answer of "-30" against oracle "30" earns partial credit because "30" is a
+    substring of "-30", even though it is numerically wrong).
+
+    Divergence from upstream (for portability/correctness, not reinvention):
+    upstream's own training/eval harnesses do not call `score_answer` on a raw,
+    unprocessed model completion -- reasoning_gym/utils.py ships
+    `extract_answer(completion, tag_name="answer")` plus an `<answer>...</answer>`
+    system-prompt convention (SYSTEM_PROMPTS["default"]/["simple"]) specifically
+    so a short candidate string is extracted from the completion before scoring.
+    This port reuses this module's own `extract_candidate_answer()` (already used
+    by every other verifier in this file, and already handling `<answer>...
+    </answer>` plus "final answer:"-style spans) as that pre-extraction step,
+    instead of importing reasoning_gym.utils.extract_answer, because this function
+    must stay stdlib-only to run inside Polar's isolated task sandbox (no
+    reasoning-gym install there). Scoring the full raw completion directly against
+    `oracle_answer in answer` would make the substring-containment fallback branch
+    fire on almost every completion that ever states the correct number in prose,
+    which is not what upstream's own scoring convention intends when used with a
+    chain-of-thought policy.
+    """
+
+    oracle_answer = str(task.answer or "")
+    candidate = extract_candidate_answer(completion)
+    reward = 0.0
+    if isinstance(candidate, str) and len(candidate) > 0:
+        if candidate == oracle_answer:
+            reward = 1.0
+        elif oracle_answer and oracle_answer in candidate:
+            reward = len(oracle_answer) / len(candidate)
+    passed = reward >= 1.0
+    if passed:
+        reason = "reasoning_gym_exact_match"
+    elif reward > 0.0:
+        reason = "reasoning_gym_partial_substring_match"
+    else:
+        reason = "reasoning_gym_no_match"
+    return VerifierResult(
+        passed=passed,
+        reward=reward,
+        reason=reason,
+        normalized_completion=candidate,
+        normalized_answer=oracle_answer,
+        metadata={
+            "verifier": "reasoning_gym_basic_arithmetic",
+            "ported_from": "reasoning_gym.dataset.ProceduralDataset.score_answer",
+        },
+    )
 
 
 def _verify_exact(completion: str, task: TaskSpec) -> VerifierResult:
@@ -663,6 +742,41 @@ def verify_materials_tensile_numeric(completion, task):
         },
     }
 
+def verify_reasoning_gym_basic_arithmetic(completion, task):
+    # Ported verbatim from reasoning_gym.dataset.ProceduralDataset.score_answer
+    # (reasoning-gym==0.1.25 / github.com/open-thought/reasoning-gym commit
+    # 49b07130b3fcd12f2d064bba7c43869543a0e7e7, reasoning_gym/dataset.py:63-72),
+    # which BasicArithmeticDataset inherits unmodified. See the in-module
+    # docstring on _verify_reasoning_gym_basic_arithmetic in verifiers.py for the
+    # full citation and the documented divergence (extract_candidate_answer() as
+    # a stdlib-only stand-in for reasoning_gym.utils.extract_answer()).
+    oracle_answer = str(task.get("answer") or "")
+    candidate = extract_candidate_answer(completion)
+    reward = 0.0
+    if isinstance(candidate, str) and len(candidate) > 0:
+        if candidate == oracle_answer:
+            reward = 1.0
+        elif oracle_answer and oracle_answer in candidate:
+            reward = len(oracle_answer) / len(candidate)
+    passed = reward >= 1.0
+    if passed:
+        reason = "reasoning_gym_exact_match"
+    elif reward > 0.0:
+        reason = "reasoning_gym_partial_substring_match"
+    else:
+        reason = "reasoning_gym_no_match"
+    return {
+        "passed": passed,
+        "reward": reward,
+        "reason": reason,
+        "normalized_completion": candidate,
+        "normalized_answer": oracle_answer,
+        "metadata": {
+            "verifier": "reasoning_gym_basic_arithmetic",
+            "ported_from": "reasoning_gym.dataset.ProceduralDataset.score_answer",
+        },
+    }
+
 def verify_completion(completion, task):
     source = str(task.get("source_dataset") or "").casefold()
     verifier_name = str(task.get("verifier_name") or "").casefold()
@@ -670,6 +784,8 @@ def verify_completion(completion, task):
     candidate_raw = extract_candidate_answer(completion)
     if verifier_name == "materials_tensile_numeric":
         return verify_materials_tensile_numeric(completion, task)
+    if verifier_name == "reasoning_gym_basic_arithmetic":
+        return verify_reasoning_gym_basic_arithmetic(completion, task)
     if source == "calendar" or verifier_name == "calendar_gym":
         exp_cal_state = normalize_calendar_state(coerce_jsonish(expected_text))
         reward, reason = grade_calendar_response(completion, exp_cal_state)
