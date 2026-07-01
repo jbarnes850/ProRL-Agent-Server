@@ -9,6 +9,15 @@ WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
 HEAD_HOSTNAME="${HEAD_HOSTNAME:-spark-f7e2}"
 WORKER_HOSTNAME="${WORKER_HOSTNAME:-spark-cfd0}"
 NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp1s0f1np1}"
+# Ray's default object-store reservation is ~30% of node memory
+# (DEFAULT_OBJECT_STORE_MEMORY_PROPORTION), uncapped. On DGX Spark's unified
+# CPU+GPU memory pool that reservation competes directly with model weights
+# and the optimizer offload/onload cycle for the same ~121.69GB budget --
+# this repo's async GRPO topology moves weights via NCCL broadcast, not
+# through Ray's plasma object store, so the object store rarely needs more
+# than a few GB. Capping it recovers real headroom (observed: Cell 6 scale-up
+# OOM'd on spark-cfd0 with a ~0.3GB/0.25% margin at the default reservation).
+RAY_OBJECT_STORE_MEMORY_BYTES="${RAY_OBJECT_STORE_MEMORY_BYTES:-8589934592}"
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_MOUNT_HOST="${MODEL_MOUNT_HOST:-}"
@@ -442,7 +451,7 @@ docker run -d --name "${HEAD_CONTAINER}" \
   "${COMMON_DOCKER[@]}" \
   "${COMMON_ENV[@]}" \
   "${IMAGE}" \
-  bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --head --node-ip-address=${HEAD_IP} --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --disable-usage-stats --block" \
+  bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --head --node-ip-address=${HEAD_IP} --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --object-store-memory=${RAY_OBJECT_STORE_MEMORY_BYTES} --disable-usage-stats --block" \
   > "${RUN_DIR}/head.container.id"
 
 sleep 8
@@ -483,7 +492,7 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
   -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS} \
   "${IMAGE}" \
-  bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --address=${HEAD_IP}:6379 --node-ip-address=${WORKER_IP} --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --disable-usage-stats --block" \
+  bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --address=${HEAD_IP}:6379 --node-ip-address=${WORKER_IP} --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --object-store-memory=${RAY_OBJECT_STORE_MEMORY_BYTES} --disable-usage-stats --block" \
   > "${RUN_DIR}/worker.container.id"
 EOF
 
