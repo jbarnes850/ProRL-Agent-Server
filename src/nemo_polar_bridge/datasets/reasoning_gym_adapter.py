@@ -37,19 +37,12 @@ else:
     _REASONING_GYM_IMPORT_MESSAGE = ""
 
 
-# Verified against reasoning-gym==0.1.25 (PyPI, fetched 2026-06-30):
-# `reasoning_gym.create_dataset("basic_arithmetic", size=..., seed=...)` returns a
-# `reasoning_gym.arithmetic.basic_arithmetic.BasicArithmeticDataset` instance whose
-# `DATASET_NAME` class constant is the literal string "basic_arithmetic" (registered
-# via `register_dataset(DATASET_NAME, BasicArithmeticDataset, ...)` in
-# reasoning_gym/arithmetic/basic_arithmetic.py). Confirmed live by constructing the
-# dataset and indexing it -- not assumed from documentation.
+# create_dataset("basic_arithmetic", ...) returns a BasicArithmeticDataset whose
+# DATASET_NAME constant == "basic_arithmetic" (reasoning-gym 0.1.25).
 DEFAULT_TASK_NAME = "basic_arithmetic"
 
-# New verifier_name (per adapter contract point (d)): dispatched in verifiers.py to a
-# faithful port of reasoning-gym's own `score_answer` default implementation, kept
-# distinct from the base "exact_normalized" verifier because the scoring semantics
-# (fractional substring-containment partial credit) differ from exact/normalized match.
+# Dispatched in verifiers.py to a port of reasoning-gym's score_answer; distinct from
+# "exact_normalized" because scoring uses fractional substring-containment partial credit.
 REASONING_GYM_VERIFIER_NAME = "reasoning_gym_basic_arithmetic"
 
 REASONING_GYM_LICENSE = "Apache-2.0"

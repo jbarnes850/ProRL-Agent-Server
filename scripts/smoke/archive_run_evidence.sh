@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Pull the mechanical evidence a smoke run wrote to remote scratch back onto
-# the controller, into runs/<slug>/evidence/. Without this, a run's proof
-# (validation_summary.json's status field, per the rider's own evidence bar)
-# lives only on ephemeral Spark-host scratch and is lost the moment that
-# host's disk gets reused -- the smoke script's only cross-host data movement
-# is a one-way push (controller/head -> worker), nothing pulls results back.
+# Pull a smoke run's evidence from ephemeral remote scratch back to the
+# controller (runs/<slug>/evidence/); the smoke run only pushes one-way.
 #
 # Usage:
 #   scripts/smoke/archive_run_evidence.sh <host_ssh_target> <remote_run_dir> <local_slug>
@@ -45,8 +41,7 @@ for f in "${EVIDENCE_FILES[@]}"; do
   fi
 done
 
-# Also pull the raw logs directory (exit-code.log, nohup log if present,
-# grpo-polar step logs) so a failed run's partial evidence is preserved too.
+# Pull raw logs too so a failed run's partial evidence is preserved.
 if ssh "${HOST_SSH}" "test -d '${REMOTE_RUN_DIR}/logs'" 2>/dev/null; then
   rsync -az "${HOST_SSH}:${REMOTE_RUN_DIR}/logs/" "${DEST_DIR}/logs/" 2>/dev/null || true
 fi

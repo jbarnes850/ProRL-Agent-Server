@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# c236061b is the proven, currently-deployed NeMo RL revision (matches
-# preflight_spark.sh's own default). The prior default (37526dfa) predates
-# CISPO's use_cispo config key entirely -- any spec that omits an explicit
-# IMAGE/NEMO_RL_REF override (i.e. relies on RuntimeProfile.image/
-# nemo_rl_ref's documented None-falls-back-to-this-default behavior) and
-# uses the cispo algorithm axis would silently run against the stale image
-# and fail with `Could not override 'loss_fn.use_cispo': Key 'use_cispo'
-# is not in struct` -- confirmed live: `docker run --rm
-# local/nemo-rl-main-cu132:37526dfa grep -rn use_cispo /opt/nemo-rl/` has
-# zero matches, while the c236061b image has use_cispo in its base recipe.
+# c236061b is the proven deployed NeMo RL revision (matches preflight_spark.sh's
+# default). Older 37526dfa predates the use_cispo config key, so any cispo-axis
+# spec relying on the default image fails with "Key 'use_cispo' is not in struct".
 NEMO_RL_REF="${NEMO_RL_REF:-c236061b250e97638722292ab8a54d5eb47ae00f}"
 IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
@@ -19,19 +12,9 @@ WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
 HEAD_HOSTNAME="${HEAD_HOSTNAME:-spark-f7e2}"
 WORKER_HOSTNAME="${WORKER_HOSTNAME:-spark-cfd0}"
 NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp1s0f1np1}"
-# Weight-sync transport. Every run through this script prior to 2026-07-01
-# forced NCCL onto plain TCP sockets (NCCL_IB_DISABLE=1, NCCL_NET=Socket,
-# NCCL_NET_PLUGIN=none) even though both hosts' enp1s0f1np1 NIC has an
-# active, working RoCEv2 link (`rdma link show`: rocep1s0f1 ACTIVE
-# LINK_UP) -- confirmed by grepping the weight-sync NCCL communicator
-# (nranks=2, the exact train<->inference group) out of an archived
-# validation log: "NCCL INFO Using network Socket" and "GPU Direct RDMA
-# Disabled for HCA 0 'enp1s0f1np1'". Nothing disabled it for a documented
-# reason; it was inherited from an earlier debugging session and never
-# revisited. Default here preserves that proven Socket-only behavior;
-# set NCCL_TRANSPORT=roce to route the weight-sync broadcast over RDMA
-# instead. GID index 3 (RoCEv2, IPv4-mapped) confirmed via `show_gids` on
-# both hosts against device rocep1s0f1.
+# Weight-sync NCCL transport. Default forces plain TCP sockets (IB disabled);
+# set NCCL_TRANSPORT=roce to route the weight-sync broadcast over RDMA instead.
+# GID index 3 = RoCEv2 IPv4-mapped on device rocep1s0f1 (both hosts).
 NCCL_TRANSPORT="${NCCL_TRANSPORT:-socket}"
 NCCL_IB_HCA="${NCCL_IB_HCA:-rocep1s0f1}"
 NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
@@ -44,30 +27,14 @@ else
   NCCL_NET_VALUE="Socket"
   NCCL_NET_PLUGIN_VALUE="none"
 fi
-# Ray's default object-store reservation is ~30% of node memory
-# (DEFAULT_OBJECT_STORE_MEMORY_PROPORTION), uncapped. On DGX Spark's unified
-# CPU+GPU memory pool that reservation competes directly with model weights
-# and the optimizer offload/onload cycle for the same ~121.69GB budget --
-# this repo's async GRPO topology moves weights via NCCL broadcast, not
-# through Ray's plasma object store, so the object store rarely needs more
-# than a few GB. Capping it recovers real headroom (observed: Cell 6 scale-up
-# OOM'd on spark-cfd0 with a ~0.3GB/0.25% margin at the default reservation).
+# Cap Ray's object store: its default ~30% uncapped reservation competes with
+# model weights and optimizer offload for DGX Spark's unified ~121.69GB pool.
+# Async GRPO moves weights via NCCL broadcast, not plasma, so a few GB suffices.
 RAY_OBJECT_STORE_MEMORY_BYTES="${RAY_OBJECT_STORE_MEMORY_BYTES:-8589934592}"
-# P5.2 diagnostic (free -m / docker stats polled every 8s through a real
-# 3-step run on spark-cfd0) confirmed: docker's reported container memory
-# stays flat/low (e.g. ~5GB) while true host `free -m` usage grows sharply
-# and repeatedly during each refit's weight-broadcast phase specifically
-# (observed transient spikes up to ~85GB host-vs-docker gap during a single
-# refit, receding afterward) -- not a smooth per-step leak, but real memory
-# concentrated around packed_broadcast_producer's bucket buffer that
-# Docker's cgroup accounting on this unified-memory (Grace Blackwell) host
-# doesn't attribute to the container. NRL_REFIT_BUFFER_MEMORY_RATIO sizes
-# that exact buffer (fraction of device memory per bucket, doubled via
-# NRL_REFIT_NUM_BUFFERS' double-buffering) -- default here (0.05) has been
-# the value since this bridge's original commit, not a deliberate tuning
-# choice; override lower (e.g. 0.02, upstream NeMo RL's own documented
-# default) to shrink the transient spike with margin against the true host
-# RSS this diagnostic measured, not what cgroup reports.
+# Sizes the refit weight-broadcast bucket buffer (fraction of device memory per
+# bucket, doubled by NRL_REFIT_NUM_BUFFERS). Broadcast spikes true host RSS in a
+# way Docker cgroup accounting misses on this unified-memory host; override lower
+# (e.g. 0.02, upstream default) to shrink the transient spike.
 NRL_REFIT_BUFFER_MEMORY_RATIO="${NRL_REFIT_BUFFER_MEMORY_RATIO:-0.05}"
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
@@ -108,9 +75,7 @@ POLAR_MODEL_MAX_NEW_TOKENS="${POLAR_MODEL_MAX_NEW_TOKENS:-1024}"
 POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH="${POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH:-8192}"
 POLAR_MODEL_MAX_MODEL_LEN="${POLAR_MODEL_MAX_MODEL_LEN:-8192}"
 POLAR_MODEL_TEMPERATURE="${POLAR_MODEL_TEMPERATURE:-0.6}"
-# Keep RL rollout support identical between sampled vLLM tokens and NeMo
-# logprob recomputation. Nucleus truncation can produce sparse -inf positions
-# when the recomputed policy support differs slightly from the sampler.
+# top_p=1.0 keeps recomputed-logprob support identical to the sampler; nucleus truncation otherwise yields sparse -inf positions.
 POLAR_MODEL_TOP_P="${POLAR_MODEL_TOP_P:-1.0}"
 NEMO_VLLM_GPU_MEMORY_UTILIZATION="${NEMO_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
 NEMO_VLLM_ENFORCE_EAGER="${NEMO_VLLM_ENFORCE_EAGER:-true}"
@@ -270,12 +235,8 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
   if [[ -n "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}" ]]; then
     PREPARE_VLLM_ARGS+=(--vllm-max-num-batched-tokens "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}")
   fi
-  # Prefer the repo's own venv interpreter over bare `python3`: on a plain
-  # non-interactive SSH shell, `python3` resolves to the system interpreter
-  # (verified: /usr/bin/python3 on spark-f7e2), which has none of the repo's
-  # pip-installed extras (e.g. the reasoning-gym extra). nemo_polar_bridge's
-  # base path has zero third-party deps so this was invisible until an
-  # adapter needing a real dependency was added.
+  # Prefer the repo venv over bare python3: a non-interactive SSH shell resolves
+  # python3 to the system interpreter, which lacks the repo's pip extras (e.g. reasoning-gym).
   PREPARE_DATASET_PYTHON="python3"
   if [[ -x "${REPO_HOST}/.venv/bin/python3" ]]; then
     PREPARE_DATASET_PYTHON="${REPO_HOST}/.venv/bin/python3"
@@ -497,13 +458,9 @@ COMMON_DOCKER=(
   --ulimit stack=67108864
   --shm-size=32g
   --cap-add=IPC_LOCK
-  # A directory bind-mount of /dev/infiniband makes the device nodes visible
-  # in the container's filesystem (ls succeeds) but does NOT update Docker's
-  # device cgroup whitelist, which gates the actual open()/ioctl() syscalls
-  # libibverbs needs -- confirmed live: ibv_devinfo failed with "Failed to
-  # open device" on all 4 RoCE devices under a plain volume mount, and
-  # succeeded immediately once each device file was passed via its own
-  # --device flag instead.
+  # Pass each IB device via its own --device flag: a bind-mount of /dev/infiniband
+  # makes the nodes visible but doesn't update Docker's device cgroup whitelist,
+  # so libibverbs open()/ioctl() fails ("Failed to open device").
   --device=/dev/infiniband/uverbs0
   --device=/dev/infiniband/uverbs1
   --device=/dev/infiniband/uverbs2

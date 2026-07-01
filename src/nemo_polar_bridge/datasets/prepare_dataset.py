@@ -24,10 +24,7 @@ FINAL_ANSWER_INSTRUCTION = (
     "final result and nothing else."
 )
 MULTI_TURN_EXECUTION_TYPES = {"multi_turn_chat_tool", "multi_step_chat_tool"}
-# Shell-harness task type: the model proposes a shell command, the sandbox runs
-# it, and reward comes from the command's actual stdout, not from string-matching
-# the command text. Selected by execution_type so it reuses the nemo_gym adapter
-# + the existing Polar ShellHarness/verifier_result_file path with no new harness.
+# Shell-harness task type: reward from the command's actual stdout (not string-matching); reuses the nemo_gym adapter + Polar verifier_result_file path, no new harness.
 SHELL_EXEC_EXECUTION_TYPES = {"shell_command_exec"}
 
 

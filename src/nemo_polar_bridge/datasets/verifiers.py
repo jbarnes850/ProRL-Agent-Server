@@ -289,52 +289,21 @@ def _redact_materials_answer(answer: dict[str, Any]) -> dict[str, Any]:
 
 
 def _verify_reasoning_gym_basic_arithmetic(completion: str, task: TaskSpec) -> VerifierResult:
-    """Faithful port of reasoning-gym's default ``score_answer``.
+    """Faithful port of reasoning-gym's ``ProceduralDataset.score_answer``.
 
-    Upstream source (verified live against reasoning-gym==0.1.25, PyPI, fetched
-    2026-06-30; also matches github.com/open-thought/reasoning-gym commit
-    49b07130b3fcd12f2d064bba7c43869543a0e7e7,
-    reasoning_gym/dataset.py lines 63-72):
+    Ported from reasoning-gym==0.1.25 (open-thought/reasoning-gym commit
+    49b07130b3fcd12f2d064bba7c43869543a0e7e7, reasoning_gym/dataset.py:63-72),
+    which ``BasicArithmeticDataset`` inherits unmodified. Scoring is reproduced
+    verbatim: exact match -> 1.0; oracle substring-contained in candidate ->
+    ``len(oracle)/len(candidate)``; otherwise 0.0. This keeps upstream's naive
+    substring behavior (e.g. "-30" earns partial credit against oracle "30").
 
-        def score_answer(self, answer: Optional[str], entry: dict[str, Any]) -> float:
-            \"\"\"Overwrite this method in derived classes if a single oracle answer
-            is not available.\"\"\"
-            oracle_answer = entry["answer"]
-            reward = 0.0
-            if isinstance(answer, str) and len(answer) > 0:
-                if answer == oracle_answer:
-                    reward = 1.0
-                elif oracle_answer in answer:
-                    reward = len(oracle_answer) / len(answer)
-            return reward
-
-    `reasoning_gym.arithmetic.basic_arithmetic.BasicArithmeticDataset` does not
-    override `score_answer` (confirmed live: `"score_answer" not in
-    BasicArithmeticDataset.__dict__`), so it inherits this exact
-    `ProceduralDataset.score_answer` implementation unmodified. The comparison
-    logic below (exact match -> reward 1.0; oracle substring-contained in the
-    candidate -> partial credit `len(oracle)/len(candidate)`; anything else,
-    including a None/empty candidate -> reward 0.0) is reproduced verbatim,
-    including the "somewhat naive" substring-containment behavior (e.g. an
-    answer of "-30" against oracle "30" earns partial credit because "30" is a
-    substring of "-30", even though it is numerically wrong).
-
-    Divergence from upstream (for portability/correctness, not reinvention):
-    upstream's own training/eval harnesses do not call `score_answer` on a raw,
-    unprocessed model completion -- reasoning_gym/utils.py ships
-    `extract_answer(completion, tag_name="answer")` plus an `<answer>...</answer>`
-    system-prompt convention (SYSTEM_PROMPTS["default"]/["simple"]) specifically
-    so a short candidate string is extracted from the completion before scoring.
-    This port reuses this module's own `extract_candidate_answer()` (already used
-    by every other verifier in this file, and already handling `<answer>...
-    </answer>` plus "final answer:"-style spans) as that pre-extraction step,
-    instead of importing reasoning_gym.utils.extract_answer, because this function
-    must stay stdlib-only to run inside Polar's isolated task sandbox (no
-    reasoning-gym install there). Scoring the full raw completion directly against
-    `oracle_answer in answer` would make the substring-containment fallback branch
-    fire on almost every completion that ever states the correct number in prose,
-    which is not what upstream's own scoring convention intends when used with a
-    chain-of-thought policy.
+    Divergence: upstream pairs ``score_answer`` with
+    ``reasoning_gym.utils.extract_answer`` and an ``<answer>...</answer>``
+    convention. This port uses the module-local ``extract_candidate_answer()``
+    as the pre-extraction step to stay stdlib-only inside Polar's sandbox;
+    scoring the raw completion directly would fire the substring fallback on
+    any completion that merely states the correct number in prose.
     """
 
     oracle_answer = str(task.answer or "")
@@ -433,9 +402,7 @@ def _verify_matrix(completion: str, task: TaskSpec) -> VerifierResult:
 
 
 def _verify_tower_of_hanoi(completion: str, task: TaskSpec) -> VerifierResult:
-    # First iteration: require the expected move sequence exactly after normalization.
-    # This is intentionally strict and deterministic; richer state simulation can
-    # be added without changing the DatasetAdapter contract.
+    # Strict, deterministic exact-match on the normalized move sequence.
     return _verify_exact(completion, task)
 
 

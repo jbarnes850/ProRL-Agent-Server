@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the NeMo RL release image from a pinned upstream revision. This is the
-# happy path for the native Async GRPO smoke: one coherent CUDA/Torch/vLLM/Ray
-# environment built by NeMo's own Dockerfile, followed by local import/GPU gates.
+# Build the NeMo RL release image from a pinned upstream revision via NeMo's own Dockerfile: one coherent CUDA/Torch/vLLM/Ray env, then local import/GPU gates.
 
 NEMO_RL_REF="${NEMO_RL_REF:-37526dfac0a80b7032659a3ea030e0a9f69f99c6}"
 IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"

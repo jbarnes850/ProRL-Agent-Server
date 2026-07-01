@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# See the matching comment in run_nemo_polar_external_collector_spark_smoke.sh:
-# c236061b is the proven, currently-deployed revision; the prior default
-# predates CISPO's use_cispo config key and silently produces a Hydra
-# struct error for any cispo-algorithm spec that relies on this default.
+# Pinned to c236061b: earlier revisions predate CISPO's use_cispo key and Hydra-struct-error on cispo specs.
 NEMO_RL_REF="${NEMO_RL_REF:-c236061b250e97638722292ab8a54d5eb47ae00f}"
 IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
@@ -13,11 +10,7 @@ WORKER_SSH="${WORKER_SSH:-jarrodbarnes@192.168.100.11}"
 HEAD_HOSTNAME="${HEAD_HOSTNAME:-spark-f7e2}"
 WORKER_HOSTNAME="${WORKER_HOSTNAME:-spark-cfd0}"
 NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp1s0f1np1}"
-# See the matching comment in run_nemo_polar_external_collector_spark_smoke.sh:
-# Ray's uncapped default object-store reservation (~30% of node memory)
-# competes with model weights and the offload/onload cycle on DGX Spark's
-# unified memory pool. This topology moves weights via NCCL broadcast, not
-# Ray's plasma store, so capping this recovers real headroom.
+# Cap Ray object-store: its ~30% default competes with weights on Spark unified memory; weights move via NCCL, not plasma.
 RAY_OBJECT_STORE_MEMORY_BYTES="${RAY_OBJECT_STORE_MEMORY_BYTES:-8589934592}"
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"

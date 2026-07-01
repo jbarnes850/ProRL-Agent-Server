@@ -18,8 +18,7 @@ from dataclasses import dataclass, field
 
 from .spec import Algorithm, ExperimentSpec
 
-# Base recipe the proven two-Spark Async GRPO run inherits from. The spec
-# carries the experiment delta over this base.
+# Base recipe the experiment delta is applied over.
 SGLANG_BASE = "examples/configs/recipes/llm/grpo-qwen3-0.6b-1n8g-sglang.yaml"
 
 # Laguna parity for CISPO: (c_low, c_high) = (1, 4) -> NeMo clamp [1-1, 1+4]=[0,5].
@@ -27,11 +26,8 @@ _CISPO_DEFAULT_CLIP = (1.0, 4.0)
 # DAPO Clip-Higher reference (dapo recipe: ratio_clip_max=0.28).
 _DAPO_DEFAULT_CLIP = (0.2, 0.28)
 
-# Scope limitation (decision 2026-06-16): the advantage baseline is NeMo's
-# standard (unweighted) RLOO leave-one-out (grpo.use_leave_one_out_baseline),
-# NOT Laguna's length-weighted leave-one-out (tech report eq. 2). Exact Laguna
-# CISPO parity would need a small advantage_estimator.py change; deferred. CISPO
-# here is the standard RLOO baseline with CISPO clipping.
+# CISPO uses NeMo's standard (unweighted) RLOO leave-one-out baseline, not
+# Laguna's length-weighted variant (tech report eq. 2); exact parity deferred.
 
 # verifier.type -> (data.default.processor, data.default.env_name)
 _VERIFIER_DATA = {
@@ -80,14 +76,10 @@ def compile_spec(spec: ExperimentSpec) -> CompiledExperiment:
     # async / two-Spark disaggregation
     ov.append(("grpo.async_grpo.enabled", ag.enabled))
     ov.append(("grpo.async_grpo.max_trajectory_age_steps", ag.lag))
-    # Emitted only on divergence: the smoke script hardcodes
-    # in_flight_weight_updates=true / recompute_kv_cache_after_weight_updates=false
-    # with no env-var hook (unlike every other SMOKE_COVERED_KEYS entry), so
-    # runtime.py routes these two through positional EXTRA_OVERRIDES rather
-    # than an env var. Emitting them unconditionally would make every spec
-    # (including the GRPO baseline) carry positional extras that just repeat
-    # the smoke script's own defaults; emitting only the delta keeps the
-    # baseline's zero-positional-extras invariant intact.
+    # Emit only on divergence from the smoke script's hardcoded defaults
+    # (in_flight=true / recompute=false); these route through positional
+    # EXTRA_OVERRIDES, so emitting the delta keeps the baseline's
+    # zero-positional-extras invariant.
     if ag.in_flight_weight_updates is not True:
         ov.append(("grpo.async_grpo.in_flight_weight_updates", ag.in_flight_weight_updates))
     if ag.recompute_kv_cache is not False:
@@ -157,14 +149,9 @@ def _emit_objective(a: Algorithm, ov: list[tuple[str, object]]) -> None:
     if a.name == "grpo":
         return
     if a.name == "drgrpo":
-        # Dr. GRPO (Liu et al., "Understanding R1-Zero-Like Training"): drop only
-        # the group-std normalization; keep the leave-one-out mean baseline and
-        # the flat token-level loss. Verified against NeMo c236061b -- the only
-        # std-division guard is advantage_estimator.py:72-78, and TOKEN_LEVEL is a
-        # flat global-token mean (loss_functions.py:589-604); adv_estimator.
-        # normalize_rewards interpolates from grpo.normalize_rewards. One-key
-        # delta over GRPO; token_level_loss=true is already the base default and
-        # the leave-one-out baseline must stay on (never emitted false here).
+        # Dr. GRPO (Liu et al.): drop group-std normalization only
+        # (advantage_estimator.py:72-78 guard); keep leave-one-out mean baseline
+        # and flat token-level loss. One-key delta over GRPO.
         ov.append(("grpo.normalize_rewards", False))
         return
     if a.name == "rloo":
@@ -203,8 +190,7 @@ def _validate(spec: ExperimentSpec) -> None:
             "Run these on the sync path or disable async."
         )
 
-    # drgrpo is a GRPO-family normalization preset (group-std off, mean baseline
-    # kept); it is only coherent with the grpo advantage estimator.
+    # drgrpo is a GRPO-family normalization preset; coherent only with the grpo advantage estimator.
     if a.name == "drgrpo" and a.advantage != "grpo":
         raise SpecCompileError(
             "drgrpo is a GRPO-family normalization preset and requires "

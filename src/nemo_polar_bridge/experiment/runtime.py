@@ -35,33 +35,20 @@ def _default_hf_hub_host_root() -> str:
 
     return os.environ.get("NEMO_POLAR_HF_HUB_HOST_ROOT", DEFAULT_HF_HUB_HOST_ROOT)
 
-# The smoke-covered keys the compiler can also emit: a curated subset of the keys
-# the smoke launcher sets (run_nemo_polar_external_collector_spark_smoke.sh:
-# 464-523), omitting the logger.* keys and the `+`-append keys the compiler never
-# emits. The GRPO baseline's compiled overrides are all within this set, so the
-# baseline composes to env-only with zero positional extras; anything the compiler
-# emits outside it (the beyond-GRPO loss/advantage keys) is appended as a
-# positional override. Those positionals carry no `+` prefix, so under
-# set_struct(True) they must already exist in the merged base (true on c236061b;
-# a future objective needing a base-absent key would require `+`-prefix support
-# the compiler does not have today).
+# Curated subset of keys the smoke launcher sets
+# (run_nemo_polar_external_collector_spark_smoke.sh:464-523), minus logger.* and the
+# `+`-append keys the compiler never emits. Keys the compiler emits outside this set
+# are appended as positional overrides; they carry no `+` prefix, so under
+# set_struct(True) they must already exist in the merged base.
 SMOKE_COVERED_KEYS = frozenset(
     {
         "grpo.async_grpo.enabled",
         "grpo.async_grpo.max_trajectory_age_steps",
-        # NOT in_flight_weight_updates / recompute_kv_cache_after_weight_updates:
-        # unlike every other key here, the smoke script hardcodes literal
-        # `=true`/`=false` with no env-var hook (verified against
-        # run_nemo_polar_external_collector_spark_smoke.sh:546-547), so
-        # treating them as "covered" silently dropped a spec's differing
-        # value. compile.py only emits these two when they diverge from the
-        # smoke script's hardcoded defaults (see compile.py), so the GRPO
-        # baseline (which uses those defaults) still composes to zero
-        # positional extras; a spec that flips one reaches the launch
-        # command as a positional override, appended after the smoke
-        # script's own hardcoded args, so Hydra's last-override-wins
-        # semantics apply -- the same mechanism the CISPO loss_fn.* keys
-        # already use.
+        # in_flight_weight_updates / recompute_kv_cache_after_weight_updates are
+        # deliberately excluded: the smoke script hardcodes them with no env hook
+        # (run_nemo_polar_external_collector_spark_smoke.sh:546-547), so the compiler
+        # emits them positionally when a spec diverges, relying on Hydra
+        # last-override-wins.
         "grpo.num_prompts_per_step",
         "grpo.num_generations_per_prompt",
         "grpo.max_num_steps",

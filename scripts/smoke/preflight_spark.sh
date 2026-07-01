@@ -1,26 +1,14 @@
 #!/usr/bin/env bash
-# Infrastructure hard gate for the two-Spark NeMo native Async GRPO + Polar
-# external collector path. Read-only: every check is a query, nothing here
-# starts, stops, or mutates a container or run. Run this before any GPU spend
-# on either host, every time -- a prior green preflight is not a reason to
-# skip a rerun.
-#
-# Mirrors the env-var contract already used by
-# run_nemo_async_grpo_spark_smoke.sh / run_nemo_polar_external_collector_spark_smoke.sh
-# so the same overrides apply here. All defaults reproduce Jarrod's two-Spark
-# setup; override every *_SSH/*_IP/*_HOST var for a different topology.
+# Read-only infrastructure gate for the two-Spark NeMo Async GRPO + Polar external
+# collector path: every check is a query, nothing is started/stopped/mutated. Run
+# before any GPU spend on either host. Mirrors the *_SSH/*_IP/*_HOST env-var
+# contract of the smoke scripts; override those vars for a different topology.
 set -uo pipefail
 
 NEMO_RL_REF="${NEMO_RL_REF:-c236061b250e97638722292ab8a54d5eb47ae00f}"
 IMAGE="${IMAGE:-local/nemo-rl-main-cu132:${NEMO_RL_REF:0:8}}"
-# HEAD_SSH targets the Tailscale-routable "spark" alias, reachable directly
-# from the controller. WORKER_SSH must NOT default to the worker's LAN-only
-# IP (192.168.100.11) the way the smoke scripts' internal WORKER_SSH does --
-# those scripts run remotely on spark-f7e2, where that LAN IP is a direct
-# peer; this script runs on the controller, where only the worker's Tailscale
-# alias is routable (verified: direct 192.168.100.11 SSH times out from the
-# controller even though ping/ssh both succeed from spark-f7e2 to the same
-# address).
+# HEAD_SSH/WORKER_SSH use Tailscale aliases: the worker's LAN-only IP is
+# routable only from the head, not from this controller (direct SSH times out).
 HEAD_SSH="${HEAD_SSH:-spark}"
 WORKER_SSH="${WORKER_SSH:-spark-cfd0}"
 HEAD_IP="${HEAD_IP:-192.168.100.10}"
