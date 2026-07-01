@@ -6,12 +6,15 @@ import math
 
 try:
     from slime.rollout.data_source import RolloutDataSourceWithBuffer
-except ImportError as _SLIME_IMPORT_ERROR:
+except ImportError as exc:
+    _SLIME_IMPORT_MESSAGE = str(exc)
+
     class RolloutDataSourceWithBuffer:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs) -> None:
             raise ImportError(
-                "Slime is required to use CeilEpochRolloutDataSourceWithBuffer."
-            ) from _SLIME_IMPORT_ERROR
+                "Slime is required to use CeilEpochRolloutDataSourceWithBuffer: "
+                f"{_SLIME_IMPORT_MESSAGE}"
+            )
 
 
 def ceil_to_batch_size(size: int, batch_size: int) -> int:
