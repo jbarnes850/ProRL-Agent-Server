@@ -208,8 +208,18 @@ if [[ -n "${POLAR_DATASET_ID}" && "${POLAR_DATASET_ID}" != "none" ]]; then
   if [[ -n "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}" ]]; then
     PREPARE_VLLM_ARGS+=(--vllm-max-num-batched-tokens "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}")
   fi
+  # Prefer the repo's own venv interpreter over bare `python3`: on a plain
+  # non-interactive SSH shell, `python3` resolves to the system interpreter
+  # (verified: /usr/bin/python3 on spark-f7e2), which has none of the repo's
+  # pip-installed extras (e.g. the reasoning-gym extra). nemo_polar_bridge's
+  # base path has zero third-party deps so this was invisible until an
+  # adapter needing a real dependency was added.
+  PREPARE_DATASET_PYTHON="python3"
+  if [[ -x "${REPO_HOST}/.venv/bin/python3" ]]; then
+    PREPARE_DATASET_PYTHON="${REPO_HOST}/.venv/bin/python3"
+  fi
   PYTHONPATH="${REPO_HOST}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-  python3 -m nemo_polar_bridge.datasets.prepare_dataset \
+  "${PREPARE_DATASET_PYTHON}" -m nemo_polar_bridge.datasets.prepare_dataset \
     --dataset-id "${POLAR_DATASET_ID}" \
     --config "${POLAR_DATASET_CONFIG}" \
     --split "${POLAR_DATASET_SPLIT}" \
