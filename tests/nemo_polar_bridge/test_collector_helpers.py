@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from urllib import error
+
+import pytest
 
 from nemo_polar_bridge.collector import (
     _flatten_traces_for_nemo,
+    _post_control,
     _render_attempt_payload,
     env_flag,
     env_int,
@@ -159,3 +163,70 @@ def test_flatten_traces_preserves_two_turn_assistant_tokens_and_masks() -> None:
     assert trace["loss_mask"] == [1, 1, 1, 0, 0, 1, 1, 1]
     assert trace["reward"] == 1.0
     assert trace["metadata"]["polar_trace_count"] == 2
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_post_control_retries_transient_failures_then_succeeds(monkeypatch) -> None:
+    # A momentary gateway blip during the pause/resume-around-refit call
+    # (prepare_for_refit/resume_after_refit) previously aborted the training
+    # step on the first URLError. It must retry before giving up.
+    calls = []
+    sleeps = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(timeout)
+        if len(calls) < 3:
+            raise error.URLError("connection refused")
+        return _FakeResponse(b'{"paused": true}')
+
+    monkeypatch.setattr("nemo_polar_bridge.collector.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("nemo_polar_bridge.collector.time.sleep", lambda s: sleeps.append(s))
+
+    result = _post_control("http://gateway/admin/inference/pause", timeout=30, attempts=3)
+
+    assert result == {"paused": True}
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+
+
+def test_post_control_raises_after_exhausting_retries(monkeypatch) -> None:
+    def fake_urlopen(req, timeout):
+        raise error.URLError("connection refused")
+
+    monkeypatch.setattr("nemo_polar_bridge.collector.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("nemo_polar_bridge.collector.time.sleep", lambda s: None)
+
+    with pytest.raises(error.URLError):
+        _post_control("http://gateway/admin/inference/pause", timeout=30, attempts=3)
+
+
+def test_post_control_succeeds_immediately_without_retry(monkeypatch) -> None:
+    calls = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(timeout)
+        return _FakeResponse(b'{"resumed": true}')
+
+    monkeypatch.setattr("nemo_polar_bridge.collector.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "nemo_polar_bridge.collector.time.sleep",
+        lambda s: (_ for _ in ()).throw(AssertionError("should not sleep on first success")),
+    )
+
+    result = _post_control("http://gateway/admin/inference/resume", timeout=30)
+
+    assert result == {"resumed": True}
+    assert len(calls) == 1

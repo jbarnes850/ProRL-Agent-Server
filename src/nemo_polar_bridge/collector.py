@@ -111,14 +111,37 @@ def _get_json(url: str, *, timeout: float) -> dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _post_control(url: str, *, timeout: float) -> dict[str, Any] | None:
+def _post_control(
+    url: str,
+    *,
+    timeout: float,
+    attempts: int = 3,
+    backoff_seconds: float = 2.0,
+) -> dict[str, Any] | None:
+    """POST to a Polar gateway admin endpoint, retrying transient connection
+    failures with linear backoff before giving up. A single unretried
+    URLError here (the prior behavior) meant a momentary gateway blip during
+    pause/resume-around-refit -- not an actual dead gateway -- would abort
+    the training step. Retries are bounded so a genuinely dead gateway still
+    surfaces an error rather than hanging indefinitely."""
+
     req = request.Request(url, data=b"", method="POST")
-    try:
-        with request.urlopen(req, timeout=timeout) as resp:
-            text = resp.read().decode("utf-8").strip()
-            return json.loads(text) if text else None
-    except error.URLError:
-        raise
+    last_error: error.URLError | None = None
+    for attempt in range(attempts):
+        try:
+            with request.urlopen(req, timeout=timeout) as resp:
+                text = resp.read().decode("utf-8").strip()
+                return json.loads(text) if text else None
+        except error.URLError as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                print(
+                    f"⚠️ Polar gateway control call failed (attempt {attempt + 1}/"
+                    f"{attempts}): {exc}. Retrying in {backoff_seconds:.1f}s..."
+                )
+                time.sleep(backoff_seconds)
+    assert last_error is not None
+    raise last_error
 
 
 def _message_text(messages: list[dict[str, Any]] | None) -> str:
