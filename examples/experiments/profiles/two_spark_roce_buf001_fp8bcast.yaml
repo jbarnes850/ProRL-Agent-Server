@@ -1,0 +1,7 @@
+# Lever 2: fp8 weight-sync broadcast, matched to the fp8/RoCE/buffer-0.01
+# baseline. NRL_FP8_BROADCAST=1 makes the smoke launcher bind-mount the
+# fp8-broadcast-patched NeMo RL producer + consumer over the pinned image.
+extra_env:
+  NCCL_TRANSPORT: roce
+  NRL_REFIT_BUFFER_MEMORY_RATIO: "0.01"
+  NRL_FP8_BROADCAST: "1"

@@ -1,0 +1,7 @@
+# Two-Spark runtime profile for the weight-sync reduction round.
+# Pins the proven fp8/RoCE/buffer-0.01 transport baseline so every lever is
+# compared at matched shape. extra_env rides into the emitted launch.sh env
+# prefix and is read by the smoke launcher's NCCL_TRANSPORT / buffer hooks.
+extra_env:
+  NCCL_TRANSPORT: roce
+  NRL_REFIT_BUFFER_MEMORY_RATIO: "0.01"

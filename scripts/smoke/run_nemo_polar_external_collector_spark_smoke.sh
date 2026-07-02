@@ -36,11 +36,31 @@ RAY_OBJECT_STORE_MEMORY_BYTES="${RAY_OBJECT_STORE_MEMORY_BYTES:-8589934592}"
 # way Docker cgroup accounting misses on this unified-memory host; override lower
 # (e.g. 0.02, upstream default) to shrink the transient spike.
 NRL_REFIT_BUFFER_MEMORY_RATIO="${NRL_REFIT_BUFFER_MEMORY_RATIO:-0.05}"
+# Lever 2: fp8 weight-sync broadcast. When NRL_FP8_BROADCAST=1, bind-mount the
+# fp8-broadcast-patched NeMo RL producer + consumer + torch-only quant module
+# over the pinned image so the broadcast carries fp8 (1 byte) instead of bf16,
+# dropping the post-receipt requant. Off by default (baseline path unchanged).
+# The mount list is built below, once REPO_HOST is resolved.
+NRL_FP8_BROADCAST="${NRL_FP8_BROADCAST:-}"
+FP8_BROADCAST_MOUNTS=()
+FP8_BROADCAST_MOUNTS_STR=""
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
 MODEL_MOUNT_HOST="${MODEL_MOUNT_HOST:-}"
 MODEL_MOUNT_CONT="${MODEL_MOUNT_CONT:-}"
 REPO_HOST="${REPO_HOST:-/home/jarrodbarnes/ProRL-Agent-Server}"
+if [[ "${NRL_FP8_BROADCAST}" == "1" ]]; then
+  _fp8pw="${REPO_HOST}/scripts/patch/nemo_rl_fp8_broadcast"
+  _fp8_dtensor="/opt/nemo-rl/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py"
+  _fp8_vllm="/opt/nemo-rl/nemo_rl/models/generation/vllm/vllm_backend.py"
+  _fp8_quant="/opt/nemo-rl/nemo_rl/utils/fp8_broadcast_quant.py"
+  FP8_BROADCAST_MOUNTS=(
+    -v "${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro"
+    -v "${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro"
+    -v "${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro"
+  )
+  FP8_BROADCAST_MOUNTS_STR="-v ${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro -v ${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro -v ${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro"
+fi
 STAMP="${1:-$(date +%Y%m%d-%H%M%S)}"
 shift || true
 EXTRA_OVERRIDES=("$@")
@@ -434,6 +454,7 @@ COMMON_ENV=(
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO}
+  -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST}
   -e PYTHONUNBUFFERED=1
   -e HF_HOME=/work/hf
   -e UV_CACHE_DIR=/work/uv-cache
@@ -471,6 +492,9 @@ COMMON_DOCKER=(
   -v "${REPO_HOST}:/work/ProRL-Agent-Server:ro"
   -v "${RUN_DIR}:/work"
 )
+if [[ ${#FP8_BROADCAST_MOUNTS[@]} -gt 0 ]]; then
+  COMMON_DOCKER+=("${FP8_BROADCAST_MOUNTS[@]}")
+fi
 
 echo "starting Ray head container on ${HEAD_IP}"
 docker run -d --name "${HEAD_CONTAINER}" \
@@ -489,6 +513,7 @@ set -euo pipefail
 docker run -d --name "${WORKER_CONTAINER}" \
   --gpus all --network host --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=32g \
   --cap-add=IPC_LOCK \
+  ${FP8_BROADCAST_MOUNTS_STR} \
   --device=/dev/infiniband/uverbs0 --device=/dev/infiniband/uverbs1 \
   --device=/dev/infiniband/uverbs2 --device=/dev/infiniband/uverbs3 \
   --device=/dev/infiniband/rdma_cm \
@@ -509,6 +534,7 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO} \
+  -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST} \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/work/hf \
   -e UV_CACHE_DIR=/work/uv-cache \
@@ -580,6 +606,7 @@ docker exec \
   -e NCCL_DEBUG_SUBSYS=INIT,NET,ENV \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO} \
+  -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST} \
   -e PYTHONUNBUFFERED=1 \
   -e PYTHONPATH=/work/ProRL-Agent-Server/src:/opt/nemo-rl \
   -e NEMO_POLAR_ROLLOUT_URL=http://${HEAD_IP}:${POLAR_ROLLOUT_PORT} \
