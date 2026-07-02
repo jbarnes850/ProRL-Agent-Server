@@ -42,6 +42,15 @@ NRL_REFIT_BUFFER_MEMORY_RATIO="${NRL_REFIT_BUFFER_MEMORY_RATIO:-0.05}"
 # dropping the post-receipt requant. Off by default (baseline path unchanged).
 # The mount list is built below, once REPO_HOST is resolved.
 NRL_FP8_BROADCAST="${NRL_FP8_BROADCAST:-}"
+# NRL_REFIT_PROFILE=1 mounts the same patched files (fp8 code stays gated off
+# unless NRL_FP8_BROADCAST=1 too) and turns on per-phase refit timing in the
+# instrumented packed_tensor.py. Used to attribute weight_sync_s.
+NRL_REFIT_PROFILE="${NRL_REFIT_PROFILE:-}"
+# Fix: skip the ~32GB optimizer offload/onload in the non-colocated refit. The
+# offload was profiled at 227s per refit (98% of weight_sync_s) and is
+# unnecessary when the inference engine runs on separate GPUs. Reuses the same
+# patched dtensor worker (bind-mounted). Off by default.
+NRL_REFIT_SKIP_OPT_OFFLOAD="${NRL_REFIT_SKIP_OPT_OFFLOAD:-}"
 FP8_BROADCAST_MOUNTS=()
 FP8_BROADCAST_MOUNTS_STR=""
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
@@ -49,17 +58,19 @@ MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899d
 MODEL_MOUNT_HOST="${MODEL_MOUNT_HOST:-}"
 MODEL_MOUNT_CONT="${MODEL_MOUNT_CONT:-}"
 REPO_HOST="${REPO_HOST:-/home/jarrodbarnes/ProRL-Agent-Server}"
-if [[ "${NRL_FP8_BROADCAST}" == "1" ]]; then
+if [[ "${NRL_FP8_BROADCAST}" == "1" || "${NRL_REFIT_PROFILE}" == "1" || "${NRL_REFIT_SKIP_OPT_OFFLOAD}" == "1" ]]; then
   _fp8pw="${REPO_HOST}/scripts/patch/nemo_rl_fp8_broadcast"
   _fp8_dtensor="/opt/nemo-rl/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py"
   _fp8_vllm="/opt/nemo-rl/nemo_rl/models/generation/vllm/vllm_backend.py"
   _fp8_quant="/opt/nemo-rl/nemo_rl/utils/fp8_broadcast_quant.py"
+  _fp8_packed="/opt/nemo-rl/nemo_rl/utils/packed_tensor.py"
   FP8_BROADCAST_MOUNTS=(
     -v "${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro"
     -v "${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro"
     -v "${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro"
+    -v "${_fp8pw}/packed_tensor.py:${_fp8_packed}:ro"
   )
-  FP8_BROADCAST_MOUNTS_STR="-v ${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro -v ${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro -v ${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro"
+  FP8_BROADCAST_MOUNTS_STR="-v ${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro -v ${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro -v ${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro -v ${_fp8pw}/packed_tensor.py:${_fp8_packed}:ro"
 fi
 STAMP="${1:-$(date +%Y%m%d-%H%M%S)}"
 shift || true
@@ -455,6 +466,8 @@ COMMON_ENV=(
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO}
   -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST}
+  -e NRL_REFIT_PROFILE=${NRL_REFIT_PROFILE}
+  -e NRL_REFIT_SKIP_OPT_OFFLOAD=${NRL_REFIT_SKIP_OPT_OFFLOAD}
   -e PYTHONUNBUFFERED=1
   -e HF_HOME=/work/hf
   -e UV_CACHE_DIR=/work/uv-cache
@@ -535,6 +548,8 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO} \
   -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST} \
+  -e NRL_REFIT_PROFILE=${NRL_REFIT_PROFILE} \
+  -e NRL_REFIT_SKIP_OPT_OFFLOAD=${NRL_REFIT_SKIP_OPT_OFFLOAD} \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/work/hf \
   -e UV_CACHE_DIR=/work/uv-cache \
@@ -607,6 +622,8 @@ docker exec \
   -e GLOO_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} \
   -e NRL_REFIT_BUFFER_MEMORY_RATIO=${NRL_REFIT_BUFFER_MEMORY_RATIO} \
   -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST} \
+  -e NRL_REFIT_PROFILE=${NRL_REFIT_PROFILE} \
+  -e NRL_REFIT_SKIP_OPT_OFFLOAD=${NRL_REFIT_SKIP_OPT_OFFLOAD} \
   -e PYTHONUNBUFFERED=1 \
   -e PYTHONPATH=/work/ProRL-Agent-Server/src:/opt/nemo-rl \
   -e NEMO_POLAR_ROLLOUT_URL=http://${HEAD_IP}:${POLAR_ROLLOUT_PORT} \

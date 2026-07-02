@@ -1,0 +1,8 @@
+# Fix: skip the unnecessary ~32GB optimizer offload/onload in the non-colocated
+# refit (profiled at 227s = 98% of weight_sync_s). Profile on to confirm
+# offload_before_refit drops to ~0s. Matched to the fp8/RoCE/buffer-0.01 baseline.
+extra_env:
+  NCCL_TRANSPORT: roce
+  NRL_REFIT_BUFFER_MEMORY_RATIO: "0.01"
+  NRL_REFIT_SKIP_OPT_OFFLOAD: "1"
+  NRL_REFIT_PROFILE: "1"

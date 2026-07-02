@@ -1,0 +1,7 @@
+# Fix (production): skip the unnecessary ~32GB optimizer offload/onload in the
+# non-colocated refit. Profiling OFF so weight_sync_s is un-perturbed. Matched to
+# the fp8/RoCE/buffer-0.01 baseline for the seed comparison.
+extra_env:
+  NCCL_TRANSPORT: roce
+  NRL_REFIT_BUFFER_MEMORY_RATIO: "0.01"
+  NRL_REFIT_SKIP_OPT_OFFLOAD: "1"

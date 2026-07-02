@@ -1,0 +1,7 @@
+# Refit profiling: baseline path (fp8 broadcast OFF) with per-phase weight-sync
+# timing ON. Attributes weight_sync_s across producer {generate/pack/broadcast}
+# and consumer {receive/unpack/load}. Matched to the fp8/RoCE/buffer-0.01 baseline.
+extra_env:
+  NCCL_TRANSPORT: roce
+  NRL_REFIT_BUFFER_MEMORY_RATIO: "0.01"
+  NRL_REFIT_PROFILE: "1"

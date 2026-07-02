@@ -14,6 +14,8 @@
 
 import contextlib
 import gc
+import os
+import time
 import warnings
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any, Generator, Iterable, Optional
@@ -85,6 +87,36 @@ from nemo_rl.utils.fp8_broadcast_quant import (
 )
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.packed_tensor import packed_broadcast_producer
+
+
+# Refit-phase profiling (NRL_REFIT_PROFILE=1): time the optimizer offload/onload
+# calls that bracket the weight broadcast in the non-colocated refit, to check
+# whether they -- not the transfer -- own weight_sync_s. Serialized device time;
+# off by default -> zero effect on the measured path.
+_REFIT_PROFILE = os.getenv("NRL_REFIT_PROFILE") == "1"
+
+
+def _profile_refit_phase(label):
+    def deco(fn):
+        def wrapper(*args, **kwargs):
+            if not _REFIT_PROFILE:
+                return fn(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            _t = time.perf_counter()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                print(
+                    f"[refit_profile] {label}={time.perf_counter() - _t:.2f}s",
+                    flush=True,
+                )
+
+        return wrapper
+
+    return deco
 
 
 # FP8 weight-sync broadcast (lever 2): quantize the broadcast payload to fp8 on
@@ -1282,6 +1314,7 @@ class DTensorPolicyWorkerV2Impl(
         gc.collect()
         torch.cuda.empty_cache()
 
+    @_profile_refit_phase("prepare_for_training")
     @wrap_with_nvtx_name("dtensor_policy_worker_v2/prepare_for_training")
     def prepare_for_training(self, *args, **kwargs) -> None:
         # onload models and optimizer state to cuda
@@ -1301,12 +1334,28 @@ class DTensorPolicyWorkerV2Impl(
 
         torch.cuda.empty_cache()
 
+    @_profile_refit_phase("offload_before_refit")
     @torch.no_grad()
     @wrap_with_nvtx_name("dtensor_policy_worker_v2/offload_before_refit")
     def offload_before_refit(self) -> None:
         """Offload the optimizer to the CPU."""
         torch.randn(1).cuda()  # wake up torch allocator
-        if self.optimizer is not None:
+        # In non-colocated mode the inference engine runs on separate GPUs, so
+        # the optimizer never needs to leave the training GPU. Offloading the full
+        # Adam state (~32GB for 4B) cuda->cpu here -- and onloading it in
+        # prepare_for_training -- profiled at 227s per refit on GB10 unified memory
+        # (98% of weight_sync_s) and buys nothing: NeMo RL's own note in
+        # broadcast_weights_for_collective already warns against cpu_offload in
+        # non-colocated mode for exactly this extra offload/onload. Skip it when
+        # NRL_REFIT_SKIP_OPT_OFFLOAD=1 (set only for non-colocated runs).
+        skip_offload = os.getenv("NRL_REFIT_SKIP_OPT_OFFLOAD") == "1"
+        if _REFIT_PROFILE or skip_offload:
+            print(
+                f"[refit_profile] offload_skip={skip_offload} "
+                f"is_generation_colocated={getattr(self, 'is_generation_colocated', 'MISSING')}",
+                flush=True,
+            )
+        if self.optimizer is not None and not skip_offload:
             self.move_optimizer_to_device("cpu")
 
         gc.collect()
