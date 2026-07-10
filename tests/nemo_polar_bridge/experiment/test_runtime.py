@@ -18,6 +18,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PROVEN_RUN_YAML = (
     REPO_ROOT / "examples" / "experiments" / "qwen3-1p7b-basic_arith-grpo-8x4.yaml"
 )
+QWEN35_PROFILE = (
+    REPO_ROOT / "examples" / "experiments" / "profiles" / "two_spark_qwen35_9b_safe.yaml"
+)
+QWEN35_TOP_P_SPEC = (
+    REPO_ROOT
+    / "examples"
+    / "experiments"
+    / "qwen3p5-9b-reasoning_gym-cispo-fp8-top-p095-replay-smoke.yaml"
+)
 
 
 def grpo_spec() -> ExperimentSpec:
@@ -62,6 +71,28 @@ def test_model_host_and_cont_built_from_profile_and_spec():
     )
 
 
+def test_qwen35_profile_pins_live_roce_hca_and_gid() -> None:
+    profile = RuntimeProfile.from_yaml(QWEN35_PROFILE)
+
+    assert profile.extra_env["NCCL_TRANSPORT"] == "roce"
+    assert profile.extra_env["NCCL_SOCKET_IFNAME"] == "enp1s0f0np0"
+    assert profile.extra_env["NCCL_IB_HCA"] == "rocep1s0f0"
+    assert profile.extra_env["NCCL_IB_GID_INDEX"] == "3"
+    assert profile.extra_env["NRL_REFIT_SKIP_OPT_OFFLOAD"] == "1"
+    assert profile.extra_env["NRL_FP8_BROADCAST"] == "0"
+    assert profile.extra_env["NRL_VALIDATION_MODE"] == "infrastructure"
+
+
+def test_qwen35_top_p_replay_spec_composes_fail_closed_runtime_contract() -> None:
+    spec = ExperimentSpec.from_yaml(QWEN35_TOP_P_SPEC)
+    plan = compose_launch(spec, RuntimeProfile.from_yaml(QWEN35_PROFILE))
+
+    assert plan.env["POLAR_MODEL_TOP_P"] == "0.95"
+    assert plan.env["NRL_TOP_P_SUPPORT_REPLAY"] == "1"
+    assert plan.env["NRL_TOP_P_SUPPORT_SIZE"] == "256"
+    assert plan.env["NRL_ALLOW_NAIVE_TOP_P"] == "0"
+
+
 def test_cispo_ablation_emits_algorithm_axis_as_positional_overrides():
     plan = compose_launch(ablation("cispo"), RuntimeProfile.two_spark())
     assert "loss_fn.use_cispo=true" in plan.extra_overrides
@@ -100,7 +131,74 @@ def test_qwen3_4b_fp8_rollout_spec_maps_runtime_env():
         "models--Qwen--Qwen3-4B-Instruct-2507/snapshots/"
         "cdbee75f17c01a7cc42f958dc650907174af0554"
     )
-    assert plan.extra_overrides == []
+    # The smoke still receives the compatibility env vars above, while these
+    # authoritative copies reach vLLM's constructor through vllm_kwargs.
+    assert plan.extra_overrides == [
+        "++policy.generation.vllm_kwargs.max_num_seqs=256",
+        "++policy.generation.vllm_kwargs.max_num_batched_tokens=16384",
+    ]
+
+
+def test_long_context_text_only_runtime_reaches_launch_command():
+    spec = grpo_spec()
+    spec.model.max_total_sequence_length = 4096
+    spec.vllm_runtime.max_model_len = 131072
+    spec.vllm_runtime.max_num_seqs = 8
+    spec.vllm_runtime.max_num_batched_tokens = 65536
+    spec.vllm_runtime.enable_prefix_caching = True
+    spec.vllm_runtime.enable_chunked_prefill = True
+    spec.vllm_runtime.mamba_cache_mode = "align"
+    spec.vllm_runtime.language_model_only = True
+    spec.vllm_runtime.quantization_ignored_layer_kws = [
+        "linear_attn.in_proj_a",
+        "linear_attn.in_proj_b",
+    ]
+
+    plan = compose_launch(spec, RuntimeProfile.two_spark())
+    assert "++policy.generation.vllm_cfg.max_model_len=131072" in plan.extra_overrides
+    assert "++policy.generation.vllm_kwargs.max_num_seqs=8" in plan.extra_overrides
+    assert (
+        "++policy.generation.vllm_kwargs.max_num_batched_tokens=65536"
+        in plan.extra_overrides
+    )
+    assert "++policy.generation.vllm_cfg.enable_prefix_caching=true" in plan.extra_overrides
+    assert "++policy.generation.vllm_kwargs.enable_chunked_prefill=true" in plan.extra_overrides
+    assert "++policy.generation.vllm_kwargs.mamba_cache_mode=align" in plan.extra_overrides
+    assert "++policy.generation.vllm_kwargs.language_model_only=true" in plan.extra_overrides
+    assert (
+        "++policy.generation.vllm_cfg.quantization_ignored_layer_kws="
+        '["linear_attn.in_proj_a","linear_attn.in_proj_b"]'
+        in plan.extra_overrides
+    )
+
+
+def test_single_spark_lora_trainer_fit_reaches_launch_command():
+    spec = grpo_spec()
+    spec.trainer.activation_checkpointing = True
+    spec.trainer.freeze_vision_tower = True
+    spec.trainer.freeze_audio_tower = True
+    spec.trainer.lora.enabled = True
+    spec.trainer.lora.dim = 32
+    spec.trainer.lora.alpha = 32
+    spec.trainer.lora.target_modules = ["model.language_model.*proj*"]
+
+    plan = compose_launch(spec, RuntimeProfile.two_spark())
+    assert "policy.dtensor_cfg.activation_checkpointing=true" in plan.extra_overrides
+    assert (
+        "++policy.dtensor_cfg.automodel_kwargs.freeze_config."
+        "freeze_vision_tower=true" in plan.extra_overrides
+    )
+    assert (
+        "++policy.dtensor_cfg.automodel_kwargs.freeze_config."
+        "freeze_audio_tower=true" in plan.extra_overrides
+    )
+    assert "policy.dtensor_cfg.lora_cfg.enabled=true" in plan.extra_overrides
+    assert "policy.dtensor_cfg.lora_cfg.dim=32" in plan.extra_overrides
+    assert "policy.dtensor_cfg.lora_cfg.alpha=32" in plan.extra_overrides
+    assert (
+        "policy.dtensor_cfg.lora_cfg.target_modules="
+        '["model.language_model.*proj*"]' in plan.extra_overrides
+    )
 
 
 def test_drgrpo_ablation_emits_single_extra_override():

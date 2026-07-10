@@ -51,6 +51,14 @@ NRL_REFIT_PROFILE="${NRL_REFIT_PROFILE:-}"
 # unnecessary when the inference engine runs on separate GPUs. Reuses the same
 # patched dtensor worker (bind-mounted). Off by default.
 NRL_REFIT_SKIP_OPT_OFFLOAD="${NRL_REFIT_SKIP_OPT_OFFLOAD:-}"
+NRL_QWEN35_FP8_REFIT="${NRL_QWEN35_FP8_REFIT:-}"
+NRL_TOP_P_SUPPORT_REPLAY="${NRL_TOP_P_SUPPORT_REPLAY:-0}"
+NRL_TOP_P_SUPPORT_SIZE="${NRL_TOP_P_SUPPORT_SIZE:-256}"
+NRL_ALLOW_NAIVE_TOP_P="${NRL_ALLOW_NAIVE_TOP_P:-0}"
+# Declare the claim before launch. Infrastructure validates the rollout,
+# replay, optimizer-call, refit, and cleanup contract. Learning additionally
+# requires within-group reward variance and nonzero advantages.
+NRL_VALIDATION_MODE="${NRL_VALIDATION_MODE:-infrastructure}"
 FP8_BROADCAST_MOUNTS=()
 FP8_BROADCAST_MOUNTS_STR=""
 MODEL_HOST="${MODEL_HOST:-/home/jarrodbarnes/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca}"
@@ -58,7 +66,7 @@ MODEL_CONT="${MODEL_CONT:-/host-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899d
 MODEL_MOUNT_HOST="${MODEL_MOUNT_HOST:-}"
 MODEL_MOUNT_CONT="${MODEL_MOUNT_CONT:-}"
 REPO_HOST="${REPO_HOST:-/home/jarrodbarnes/ProRL-Agent-Server}"
-if [[ "${NRL_FP8_BROADCAST}" == "1" || "${NRL_REFIT_PROFILE}" == "1" || "${NRL_REFIT_SKIP_OPT_OFFLOAD}" == "1" ]]; then
+if [[ "${NRL_FP8_BROADCAST}" == "1" || "${NRL_REFIT_PROFILE}" == "1" || "${NRL_REFIT_SKIP_OPT_OFFLOAD}" == "1" || "${NRL_TOP_P_SUPPORT_REPLAY}" == "1" ]]; then
   _fp8pw="${REPO_HOST}/scripts/patch/nemo_rl_fp8_broadcast"
   _fp8_dtensor="/opt/nemo-rl/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py"
   _fp8_vllm="/opt/nemo-rl/nemo_rl/models/generation/vllm/vllm_backend.py"
@@ -66,11 +74,20 @@ if [[ "${NRL_FP8_BROADCAST}" == "1" || "${NRL_REFIT_PROFILE}" == "1" || "${NRL_R
   _fp8_packed="/opt/nemo-rl/nemo_rl/utils/packed_tensor.py"
   FP8_BROADCAST_MOUNTS=(
     -v "${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro"
-    -v "${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro"
     -v "${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro"
     -v "${_fp8pw}/packed_tensor.py:${_fp8_packed}:ro"
   )
-  FP8_BROADCAST_MOUNTS_STR="-v ${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro -v ${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro -v ${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro -v ${_fp8pw}/packed_tensor.py:${_fp8_packed}:ro"
+  FP8_BROADCAST_MOUNTS_STR="-v ${_fp8pw}/dtensor_policy_worker_v2.py:${_fp8_dtensor}:ro -v ${_fp8pw}/fp8_broadcast_quant.py:${_fp8_quant}:ro -v ${_fp8pw}/packed_tensor.py:${_fp8_packed}:ro"
+  if [[ "${NRL_FP8_BROADCAST}" == "1" ]]; then
+    FP8_BROADCAST_MOUNTS+=(-v "${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro")
+    FP8_BROADCAST_MOUNTS_STR+=" -v ${_fp8pw}/vllm_backend.py:${_fp8_vllm}:ro"
+  fi
+fi
+if [[ "${NRL_QWEN35_FP8_REFIT}" == "1" ]]; then
+  _qwen35_fp8="${REPO_HOST}/scripts/patch/nemo_rl_qwen35_fp8/fp8.py"
+  _nemo_fp8="/opt/nemo-rl/nemo_rl/models/generation/vllm/quantization/fp8.py"
+  FP8_BROADCAST_MOUNTS+=(-v "${_qwen35_fp8}:${_nemo_fp8}:ro")
+  FP8_BROADCAST_MOUNTS_STR+=" -v ${_qwen35_fp8}:${_nemo_fp8}:ro"
 fi
 STAMP="${1:-$(date +%Y%m%d-%H%M%S)}"
 shift || true
@@ -106,7 +123,7 @@ POLAR_MODEL_MAX_NEW_TOKENS="${POLAR_MODEL_MAX_NEW_TOKENS:-1024}"
 POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH="${POLAR_MODEL_MAX_TOTAL_SEQUENCE_LENGTH:-8192}"
 POLAR_MODEL_MAX_MODEL_LEN="${POLAR_MODEL_MAX_MODEL_LEN:-8192}"
 POLAR_MODEL_TEMPERATURE="${POLAR_MODEL_TEMPERATURE:-0.6}"
-# top_p=1.0 keeps recomputed-logprob support identical to the sampler; nucleus truncation otherwise yields sparse -inf positions.
+# top_p=1.0 needs no support replay. Truncated sampling is fail-closed below.
 POLAR_MODEL_TOP_P="${POLAR_MODEL_TOP_P:-1.0}"
 NEMO_VLLM_GPU_MEMORY_UTILIZATION="${NEMO_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
 NEMO_VLLM_ENFORCE_EAGER="${NEMO_VLLM_ENFORCE_EAGER:-true}"
@@ -127,6 +144,21 @@ POLAR_GATEWAY_MAX_POSTRUN_WORKERS="${POLAR_GATEWAY_MAX_POSTRUN_WORKERS:-${NEMO_P
 POLAR_MODEL_REQUEST_TIMEOUT_SECONDS="${POLAR_MODEL_REQUEST_TIMEOUT_SECONDS:-180}"
 POLAR_TASK_TIMEOUT_SECONDS="${POLAR_TASK_TIMEOUT_SECONDS:-300}"
 CLEANUP_DONE=0
+
+if [[ "${NRL_VALIDATION_MODE}" != "infrastructure" && "${NRL_VALIDATION_MODE}" != "learning" ]]; then
+  echo "NRL_VALIDATION_MODE must be infrastructure or learning" >&2
+  exit 2
+fi
+
+TOP_P_IS_TRUNCATED="$(python3 -c 'import sys; print(int(float(sys.argv[1]) < 1.0))' "${POLAR_MODEL_TOP_P}")"
+if [[ "${TOP_P_IS_TRUNCATED}" == "1" && "${NRL_TOP_P_SUPPORT_REPLAY}" != "1" && "${NRL_ALLOW_NAIVE_TOP_P}" != "1" ]]; then
+  echo "top_p < 1 requires NRL_TOP_P_SUPPORT_REPLAY=1; set NRL_ALLOW_NAIVE_TOP_P=1 only for a labeled negative control" >&2
+  exit 2
+fi
+if [[ "${NRL_TOP_P_SUPPORT_REPLAY}" == "1" && "${NRL_TOP_P_SUPPORT_SIZE}" -le 0 ]]; then
+  echo "NRL_TOP_P_SUPPORT_SIZE must be positive when support replay is enabled" >&2
+  exit 2
+fi
 
 cleanup_smoke_resources() {
   local original_status=$?
@@ -394,6 +426,49 @@ cat > "${RUN_DIR}/polar/task_template.json" <<JSON
 }
 JSON
 fi
+if [[ -f "${RUN_DIR}/config.json" ]]; then
+  "${PREPARE_DATASET_PYTHON:-python3}" - "${RUN_DIR}/config.json" \
+    "${NRL_REFIT_SKIP_OPT_OFFLOAD}" "${NRL_REFIT_PROFILE}" \
+    "${NRL_FP8_BROADCAST}" "${NRL_QWEN35_FP8_REFIT}" \
+    "${NRL_REFIT_BUFFER_MEMORY_RATIO}" "${NCCL_TRANSPORT}" \
+    "${NCCL_IB_HCA}" "${NCCL_IB_GID_INDEX}" \
+    "${NRL_TOP_P_SUPPORT_REPLAY}" "${NRL_TOP_P_SUPPORT_SIZE}" \
+    "${NRL_ALLOW_NAIVE_TOP_P}" "${NRL_VALIDATION_MODE}" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+flags = sys.argv[2:]
+with open(path) as fh:
+    config = json.load(fh)
+config["runtime"] = {
+    "refit": {
+        "skip_optimizer_offload": flags[0] == "1",
+        "profile_enabled": flags[1] == "1",
+        "fp8_broadcast_enabled": flags[2] == "1",
+        "qwen35_fp8_mapper_enabled": flags[3] == "1",
+        "buffer_memory_ratio": float(flags[4]),
+    },
+    "transport": {
+        "kind": flags[5],
+        "nccl_ib_hca": flags[6],
+        "nccl_ib_gid_index": int(flags[7]),
+    },
+    "sampling_distribution": {
+        "rollout_support_replay_enabled": flags[8] == "1",
+        "support_size_cap": int(flags[9]),
+        "naive_top_p_allowed": flags[10] == "1",
+    },
+    "validation": {"mode": flags[11]},
+}
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(config, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+fi
 if [[ ! -f "${RUN_DIR}/polar/topology.yaml" ]]; then
 cat > "${RUN_DIR}/polar/topology.yaml" <<YAML
 rollout:
@@ -439,6 +514,8 @@ cd "${REPO_HOST}"
 nohup .venv/bin/polar serve_rollout -c "${RUN_DIR}/polar/topology.yaml" \
   > "${RUN_DIR}/logs/polar-rollout.log" 2>&1 &
 echo $! > "${RUN_DIR}/polar/rollout.pid"
+POLAR_VLLM_CAPTURE_SAMPLING_SUPPORT="${NRL_TOP_P_SUPPORT_REPLAY}" \
+POLAR_VLLM_SAMPLING_SUPPORT_SIZE="${NRL_TOP_P_SUPPORT_SIZE}" \
 nohup .venv/bin/polar serve_gateway -c "${RUN_DIR}/polar/topology.yaml" --node-id nemo-polar-gateway \
   > "${RUN_DIR}/logs/polar-gateway.log" 2>&1 &
 echo $! > "${RUN_DIR}/polar/gateway.pid"
@@ -468,6 +545,7 @@ COMMON_ENV=(
   -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST}
   -e NRL_REFIT_PROFILE=${NRL_REFIT_PROFILE}
   -e NRL_REFIT_SKIP_OPT_OFFLOAD=${NRL_REFIT_SKIP_OPT_OFFLOAD}
+  -e NRL_QWEN35_FP8_REFIT=${NRL_QWEN35_FP8_REFIT}
   -e PYTHONUNBUFFERED=1
   -e HF_HOME=/work/hf
   -e UV_CACHE_DIR=/work/uv-cache
@@ -482,6 +560,8 @@ COMMON_ENV=(
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP}
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP}
   -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS}
+  -e NEMO_POLAR_REQUIRE_SAMPLING_SUPPORT_REPLAY=${NRL_TOP_P_SUPPORT_REPLAY}
+  -e NEMO_POLAR_SAMPLING_SUPPORT_SIZE=${NRL_TOP_P_SUPPORT_SIZE}
 )
 
 COMMON_DOCKER=(
@@ -550,6 +630,7 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST} \
   -e NRL_REFIT_PROFILE=${NRL_REFIT_PROFILE} \
   -e NRL_REFIT_SKIP_OPT_OFFLOAD=${NRL_REFIT_SKIP_OPT_OFFLOAD} \
+  -e NRL_QWEN35_FP8_REFIT=${NRL_QWEN35_FP8_REFIT} \
   -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/work/hf \
   -e UV_CACHE_DIR=/work/uv-cache \
@@ -564,6 +645,8 @@ docker run -d --name "${WORKER_CONTAINER}" \
   -e NEMO_POLAR_TRAIN_NODE_IP=${WORKER_IP} \
   -e NEMO_POLAR_INFERENCE_NODE_IP=${HEAD_IP} \
   -e NEMO_POLAR_GROUP_WORKERS=${NEMO_POLAR_GROUP_WORKERS} \
+  -e NEMO_POLAR_REQUIRE_SAMPLING_SUPPORT_REPLAY=${NRL_TOP_P_SUPPORT_REPLAY} \
+  -e NEMO_POLAR_SAMPLING_SUPPORT_SIZE=${NRL_TOP_P_SUPPORT_SIZE} \
   "${IMAGE}" \
   bash -lc "ray stop --force >/dev/null 2>&1 || true; ray start --address=${HEAD_IP}:6379 --node-ip-address=${WORKER_IP} --dashboard-agent-listen-port=52365 --dashboard-agent-grpc-port=53007 --runtime-env-agent-port=53005 --node-manager-port=53001 --object-manager-port=53003 --metrics-export-port=53009 --min-worker-port=54001 --max-worker-port=54257 --num-gpus=1 --num-cpus=16 --object-store-memory=${RAY_OBJECT_STORE_MEMORY_BYTES} --disable-usage-stats --block" \
   > "${RUN_DIR}/worker.container.id"
@@ -604,6 +687,11 @@ if [[ -n "${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}" ]]; then
     "++policy.generation.vllm_cfg.max_num_batched_tokens=${NEMO_VLLM_MAX_NUM_BATCHED_TOKENS}"
   )
 fi
+if [[ "${NRL_TOP_P_SUPPORT_REPLAY}" == "1" ]]; then
+  VLLM_HYDRA_OVERRIDES+=(
+    "++policy.generation.vllm_kwargs.max_logprobs=${NRL_TOP_P_SUPPORT_SIZE}"
+  )
+fi
 
 echo "running NeMo native Async GRPO with Polar external collector"
 set +e
@@ -624,6 +712,7 @@ docker exec \
   -e NRL_FP8_BROADCAST=${NRL_FP8_BROADCAST} \
   -e NRL_REFIT_PROFILE=${NRL_REFIT_PROFILE} \
   -e NRL_REFIT_SKIP_OPT_OFFLOAD=${NRL_REFIT_SKIP_OPT_OFFLOAD} \
+  -e NRL_QWEN35_FP8_REFIT=${NRL_QWEN35_FP8_REFIT} \
   -e PYTHONUNBUFFERED=1 \
   -e PYTHONPATH=/work/ProRL-Agent-Server/src:/opt/nemo-rl \
   -e NEMO_POLAR_ROLLOUT_URL=http://${HEAD_IP}:${POLAR_ROLLOUT_PORT} \
@@ -637,7 +726,7 @@ docker exec \
   "${HEAD_CONTAINER}" bash -lc "
     cd /opt/nemo-rl
     python -m nemo_polar_bridge.run_grpo_with_polar \
-      --config examples/configs/recipes/llm/grpo-qwen3-0.6b-1n8g-sglang.yaml \
+      --config examples/configs/grpo_math_1B_sglang.yaml \
       grpo.async_grpo.enabled=true \
       grpo.async_grpo.max_trajectory_age_steps=${NEMO_GRPO_MAX_TRAJECTORY_AGE_STEPS} \
       grpo.async_grpo.in_flight_weight_updates=true \
@@ -736,7 +825,17 @@ if config_path.exists():
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
 PY
 
-python3 "${REPO_HOST}/scripts/smoke/audit_nemo_polar_run.py" "${RUN_DIR}" || true
+AUDIT_ARGS=()
+if [[ "${NRL_VALIDATION_MODE}" == "learning" ]]; then
+  AUDIT_ARGS+=(--require-learning-signal)
+fi
+if [[ "${NRL_TOP_P_SUPPORT_REPLAY}" == "1" ]]; then
+  AUDIT_ARGS+=(--require-sampling-distribution-replay)
+fi
+set +e
+python3 "${REPO_HOST}/scripts/smoke/audit_nemo_polar_run.py" "${RUN_DIR}" "${AUDIT_ARGS[@]}"
+audit_code=$?
+set -e
 
 docker logs "${HEAD_CONTAINER}" --tail 160 > "${RUN_DIR}/logs/head-final.log" 2>&1 || true
 ssh "${WORKER_SSH}" "docker logs '${WORKER_CONTAINER}' --tail 160" > "${RUN_DIR}/logs/worker-final.log" 2>&1 || true
@@ -746,6 +845,10 @@ curl -sf "http://${HEAD_IP}:${POLAR_GATEWAY_PORT}/admin/inference/status" \
   > "${RUN_DIR}/logs/polar-gateway-inference-final.json" || true
 
 ok=1
+if [[ "${audit_code}" -ne 0 ]]; then
+  echo "validation_failed mode=${NRL_VALIDATION_MODE}" | tee -a "${RUN_DIR}/logs/exit-code.log"
+  ok=0
+fi
 for pattern in \
   "Running async GRPO training" \
   "Using Polar external rollout collector" \

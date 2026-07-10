@@ -21,7 +21,7 @@ PROVEN_RUN_YAML = (
     REPO_ROOT / "examples" / "experiments" / "qwen3-1p7b-basic_arith-grpo-8x4.yaml"
 )
 
-SGLANG_BASE = "examples/configs/recipes/llm/grpo-qwen3-0.6b-1n8g-sglang.yaml"
+SGLANG_BASE = "examples/configs/grpo_math_1B_sglang.yaml"
 QWEN3_1P7B_NEMO_PATH = (
     "/host-hf/hub/models--Qwen--Qwen3-1.7B/snapshots/"
     "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
@@ -173,6 +173,107 @@ def test_fp8_rollout_precision_sets_vllm_only_not_policy_precision():
     assert "policy.precision" not in ov
 
 
+def test_single_spark_lora_trainer_fit_compiles_to_dtensor_v2_overrides():
+    spec = proven_run_spec()
+    spec.trainer.activation_checkpointing = True
+    spec.trainer.freeze_vision_tower = True
+    spec.trainer.freeze_audio_tower = True
+    spec.trainer.lora.enabled = True
+    spec.trainer.lora.dim = 32
+    spec.trainer.lora.alpha = 32
+    spec.trainer.lora.target_modules = ["model.language_model.*proj*"]
+
+    compiled = compile_spec(spec)
+    ov = compiled.nemo_overrides_dict()
+    assert ov["policy.dtensor_cfg.activation_checkpointing"] is True
+    assert (
+        ov[
+            "++policy.dtensor_cfg.automodel_kwargs.freeze_config.freeze_vision_tower"
+        ]
+        is True
+    )
+    assert (
+        ov[
+            "++policy.dtensor_cfg.automodel_kwargs.freeze_config.freeze_audio_tower"
+        ]
+        is True
+    )
+    assert ov["policy.dtensor_cfg.lora_cfg.enabled"] is True
+    assert ov["policy.dtensor_cfg.lora_cfg.dim"] == 32
+    assert ov["policy.dtensor_cfg.lora_cfg.alpha"] == 32
+    assert ov["policy.dtensor_cfg.lora_cfg.target_modules"] == [
+        "model.language_model.*proj*"
+    ]
+    assert ov["policy.dtensor_cfg.lora_cfg.exclude_modules"] == []
+    assert ov["policy.dtensor_cfg.lora_cfg.match_all_linear"] is False
+    assert ov["policy.dtensor_cfg.lora_cfg.use_triton"] is True
+
+    args = compiled.nemo_override_args()
+    assert "policy.dtensor_cfg.activation_checkpointing=true" in args
+    assert (
+        "++policy.dtensor_cfg.automodel_kwargs.freeze_config."
+        "freeze_vision_tower=true" in args
+    )
+    assert "policy.dtensor_cfg.lora_cfg.enabled=true" in args
+    assert "policy.dtensor_cfg.lora_cfg.dim=32" in args
+    assert (
+        'policy.dtensor_cfg.lora_cfg.target_modules=["model.language_model.*proj*"]'
+        in args
+    )
+
+
+def test_lora_rejects_overlapping_match_modes():
+    spec = proven_run_spec()
+    spec.trainer.lora.enabled = True
+    spec.trainer.lora.match_all_linear = True
+
+    with pytest.raises(SpecCompileError, match="match_all_linear"):
+        compile_spec(spec)
+
+
+def test_long_context_text_only_vllm_runtime_compiles_as_additive_overrides():
+    spec = proven_run_spec()
+    spec.model.max_total_sequence_length = 4096
+    spec.vllm_runtime.max_model_len = 131072
+    spec.vllm_runtime.max_num_seqs = 8
+    spec.vllm_runtime.max_num_batched_tokens = 65536
+    spec.vllm_runtime.enable_prefix_caching = True
+    spec.vllm_runtime.enable_chunked_prefill = True
+    spec.vllm_runtime.mamba_cache_mode = "align"
+    spec.vllm_runtime.language_model_only = True
+    spec.vllm_runtime.quantization_ignored_layer_kws = [
+        "linear_attn.in_proj_a",
+        "linear_attn.in_proj_b",
+    ]
+
+    compiled = compile_spec(spec)
+    ov = compiled.nemo_overrides_dict()
+    assert ov["++policy.generation.vllm_cfg.max_model_len"] == 131072
+    assert ov["policy.max_total_sequence_length"] == 4096
+    assert ov["++policy.generation.vllm_kwargs.max_num_seqs"] == 8
+    assert ov["++policy.generation.vllm_kwargs.max_num_batched_tokens"] == 65536
+    assert ov["++policy.generation.vllm_cfg.enable_prefix_caching"] is True
+    assert ov["++policy.generation.vllm_kwargs.enable_chunked_prefill"] is True
+    assert ov["++policy.generation.vllm_kwargs.mamba_cache_mode"] == "align"
+    assert ov["++policy.generation.vllm_kwargs.language_model_only"] is True
+    assert ov[
+        "++policy.generation.vllm_cfg.quantization_ignored_layer_kws"
+    ] == ["linear_attn.in_proj_a", "linear_attn.in_proj_b"]
+
+    args = compiled.nemo_override_args()
+    assert "++policy.generation.vllm_cfg.max_model_len=131072" in args
+    assert "++policy.generation.vllm_kwargs.max_num_seqs=8" in args
+    assert "++policy.generation.vllm_kwargs.max_num_batched_tokens=65536" in args
+    assert "++policy.generation.vllm_cfg.enable_prefix_caching=true" in args
+    assert "++policy.generation.vllm_kwargs.enable_chunked_prefill=true" in args
+    assert "++policy.generation.vllm_kwargs.mamba_cache_mode=align" in args
+    assert "++policy.generation.vllm_kwargs.language_model_only=true" in args
+    assert (
+        "++policy.generation.vllm_cfg.quantization_ignored_layer_kws="
+        '["linear_attn.in_proj_a","linear_attn.in_proj_b"]' in args
+    )
+
+
 def test_drgrpo_objective_disables_std_norm_only():
     """Dr. GRPO = GRPO baseline minus group-std normalization (one-key delta).
 
@@ -227,3 +328,11 @@ def test_proven_run_yaml_matches_inline_spec():
     inline = compile_spec(proven_run_spec())
     assert from_yaml.base_config == inline.base_config
     assert from_yaml.nemo_overrides_dict() == inline.nemo_overrides_dict()
+
+
+def test_truncated_top_p_requires_recorded_support_replay() -> None:
+    spec = proven_run_spec().model_dump()
+    spec["rollout"]["top_p"] = 0.95
+
+    with pytest.raises(ValidationError, match="sampling_support_replay"):
+        ExperimentSpec.model_validate(spec)

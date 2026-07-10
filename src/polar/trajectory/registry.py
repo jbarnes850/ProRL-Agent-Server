@@ -59,6 +59,7 @@ def default_builder_registry() -> StrategyRegistry:
     """Pre-populated registry with built-in trajectory builders."""
     from polar.trajectory.builder import (
         BaseTrajectoryBuilder,
+        CompactionSegmentsBuilder,
         PerRequestBuilder,
         PrefixMergingBuilder,
     )
@@ -66,6 +67,7 @@ def default_builder_registry() -> StrategyRegistry:
     registry: StrategyRegistry[BaseTrajectoryBuilder] = StrategyRegistry(BaseTrajectoryBuilder)
     registry.register("per_request", PerRequestBuilder)
     registry.register("prefix_merging", PrefixMergingBuilder)
+    registry.register("compaction_segments", CompactionSegmentsBuilder)
     return registry
 
 

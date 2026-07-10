@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Objective = Literal["grpo", "drgrpo", "dapo", "cispo", "gspo", "rloo"]
 Advantage = Literal["grpo", "gdpo", "reinforce_plus_plus"]
@@ -95,7 +95,23 @@ class Rollout(BaseModel):
     max_steps: int
     max_epochs: int = 1
     temperature: float = 1.0
-    top_p: float = 1.0
+    top_p: float = Field(default=1.0, gt=0.0, le=1.0)
+    sampling_support_replay: bool = False
+    sampling_support_size: int = Field(default=256, gt=0)
+    allow_naive_top_p: bool = False
+
+    @model_validator(mode="after")
+    def require_replay_for_truncated_sampling(self) -> "Rollout":
+        if (
+            self.top_p < 1.0
+            and not self.sampling_support_replay
+            and not self.allow_naive_top_p
+        ):
+            raise ValueError(
+                "top_p < 1 requires sampling_support_replay=true; set "
+                "allow_naive_top_p=true only for a labeled negative control"
+            )
+        return self
 
 
 class Topology(BaseModel):
@@ -120,13 +136,47 @@ class Precision(BaseModel):
     kv_cache_dtype: str = "auto"
 
 
+class LoraConfig(BaseModel):
+    """DTensor-v2 LoRA knobs that remain portable across Spark placements."""
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    dim: int = 8
+    alpha: int = 32
+    target_modules: list[str] = Field(default_factory=lambda: ["*_proj"])
+    exclude_modules: list[str] = Field(default_factory=list)
+    match_all_linear: bool = False
+    dropout: float = 0.0
+    dropout_position: Literal["pre", "post"] = "post"
+    lora_A_init: Literal["xavier", "uniform"] = "xavier"
+    use_triton: bool = True
+
+
+class TrainerRuntime(BaseModel):
+    """Trainer-memory controls needed to make the policy fit one DGX Spark."""
+
+    model_config = _STRICT
+
+    activation_checkpointing: bool = False
+    freeze_vision_tower: Optional[bool] = None
+    freeze_audio_tower: Optional[bool] = None
+    lora: LoraConfig = Field(default_factory=LoraConfig)
+
+
 class VllmRuntime(BaseModel):
     model_config = _STRICT
 
     gpu_memory_utilization: Optional[float] = None
     enforce_eager: Optional[bool] = None
+    max_model_len: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
+    enable_prefix_caching: Optional[bool] = None
+    enable_chunked_prefill: Optional[bool] = None
+    mamba_cache_mode: Optional[Literal["none", "align", "all"]] = None
+    language_model_only: Optional[bool] = None
+    quantization_ignored_layer_kws: list[str] = Field(default_factory=list)
 
 
 class ExperimentSpec(BaseModel):
@@ -142,6 +192,7 @@ class ExperimentSpec(BaseModel):
     rollout: Rollout
     topology: Topology = Field(default_factory=Topology)
     precision: Precision = Field(default_factory=Precision)
+    trainer: TrainerRuntime = Field(default_factory=TrainerRuntime)
     vllm_runtime: VllmRuntime = Field(default_factory=VllmRuntime)
 
     @classmethod

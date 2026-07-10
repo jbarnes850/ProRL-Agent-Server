@@ -1,0 +1,37 @@
+# Runtime-only placement and smoke limits for the Qwen3.5-9B Stage 3 gate.
+image: local/nemo-rl-main-cu132:c236061b
+nemo_rl_ref: c236061b250e97638722292ab8a54d5eb47ae00f
+run_root: /home/jarrodbarnes/nemo-rl-smoke/qwen35-9b
+matrix_name: qwen35-9b-stage3
+extra_env:
+  # NeMo exports the composite Qwen3.5 namespace while vLLM text-only mode
+  # instantiates the causal-LM namespace. Adapt names or refit skips all weights.
+  NRL_QWEN35_FP8_REFIT: "1"
+  # Non-colocated inference does not need trainer optimizer state moved to CPU
+  # around every refit. This is the recipe's production weight-sync fix.
+  NRL_REFIT_SKIP_OPT_OFFLOAD: "1"
+  # Payload compression is a separate, model-specific experiment. Keep normal
+  # BF16 broadcast plus FP8 consumer requantization as the production default.
+  NRL_FP8_BROADCAST: "0"
+  # This profile proves systems durability, not reward quality. The training
+  # session must override to learning, which hard-gates group variance and
+  # nonzero advantages.
+  NRL_VALIDATION_MODE: infrastructure
+  # vLLM 0.24 auto-enables a DeepGEMM warmup for block FP8 even when the
+  # selected linear backend is Triton; Qwen3.5 disables DeepGEMM for accuracy.
+  VLLM_USE_DEEP_GEMM: "0"
+  MODEL_HOST: /home/jarrodbarnes/models/Qwen/Qwen3.5-9B
+  MODEL_CONT: /models/Qwen/Qwen3.5-9B
+  MODEL_MOUNT_HOST: /home/jarrodbarnes/models/Qwen/Qwen3.5-9B
+  MODEL_MOUNT_CONT: /models/Qwen/Qwen3.5-9B
+  POLAR_MODEL_MAX_MODEL_LEN: "131072"
+  POLAR_MODEL_MAX_NEW_TOKENS: "256"
+  POLAR_DATASET_LIMIT: "2"
+  POLAR_DATASET_SCAN_ROWS: "200"
+  POLAR_MODEL_REQUEST_TIMEOUT_SECONDS: "600"
+  POLAR_TASK_TIMEOUT_SECONDS: "900"
+  NCCL_TRANSPORT: roce
+  NCCL_SOCKET_IFNAME: enp1s0f0np0
+  NCCL_IB_HCA: rocep1s0f0
+  NCCL_IB_GID_INDEX: "3"
+  NRL_REFIT_BUFFER_MEMORY_RATIO: "0.01"

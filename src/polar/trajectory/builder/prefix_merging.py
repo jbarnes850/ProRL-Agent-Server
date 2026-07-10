@@ -148,6 +148,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         prompt_ids = list(first_trace.prompt_ids)
         stream_ids: list[int] = list(prompt_ids)
         response_slots: list[float | None] = []
+        support_slots: list[list[int] | None] = []
+        support_mass_slots: list[float | None] = []
         loss_mask: list[int] = []
         response_messages: list[dict[str, Any]] = []
 
@@ -159,7 +161,14 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # Running count of messages consumed = prompt_messages + all response_messages emitted.
         msg_acc = len(first_trace.prompt_messages)
 
-        self._append_response_tokens(first_trace, stream_ids, response_slots, loss_mask)
+        self._append_response_tokens(
+            first_trace,
+            stream_ids,
+            response_slots,
+            support_slots,
+            support_mass_slots,
+            loss_mask,
+        )
         response_messages.extend(deepcopy(m) for m in first_trace.response_messages)
         msg_acc += len(first_trace.response_messages)
         kept = 1
@@ -203,6 +212,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             if interstitial:
                 stream_ids.extend(interstitial)
                 response_slots.extend([None] * len(interstitial))
+                support_slots.extend([[] for _ in interstitial])
+                support_mass_slots.extend([0.0] * len(interstitial))
                 loss_mask.extend([0] * len(interstitial))
 
             # Message-level interstitial bookkeeping.
@@ -211,7 +222,14 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 response_messages.extend(deepcopy(m) for m in interstitial_msgs)
                 msg_acc += len(interstitial_msgs)
 
-            self._append_response_tokens(Ci_trace, stream_ids, response_slots, loss_mask)
+            self._append_response_tokens(
+                Ci_trace,
+                stream_ids,
+                response_slots,
+                support_slots,
+                support_mass_slots,
+                loss_mask,
+            )
             response_messages.extend(deepcopy(m) for m in Ci_trace.response_messages)
             msg_acc += len(Ci_trace.response_messages)
 
@@ -227,6 +245,11 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
 
         response_ids = stream_ids[len(prompt_ids):]
         response_logprobs = self._finalize_logprobs(response_slots, loss_mask)
+        sampling_support_token_ids, sampling_support_mass = self._finalize_support(
+            support_slots,
+            support_mass_slots,
+            loss_mask,
+        )
         last_kept_trace = build_trace_from_completion(chain[kept - 1])
 
         return Trace(
@@ -238,6 +261,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             tools=deepcopy(first_trace.tools),
             finish_reason=last_kept_trace.finish_reason,
             response_logprobs=response_logprobs,
+            sampling_support_token_ids=sampling_support_token_ids,
+            sampling_support_mass=sampling_support_mass,
             metadata=self._chain_metadata(chain[:kept]),
         )
 
@@ -300,6 +325,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         trace: Trace,
         stream_ids: list[int],
         response_slots: list[float | None],
+        support_slots: list[list[int] | None],
+        support_mass_slots: list[float | None],
         loss_mask: list[int],
     ) -> None:
         """Append a completion's response_ids and parallel logprob slots."""
@@ -310,9 +337,15 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             raise ValueError("trace loss_mask length must match response_ids length")
         loss_mask.extend(trace_loss_mask)
         logprobs = trace.response_logprobs or []
+        supports = trace.sampling_support_token_ids or []
+        support_masses = trace.sampling_support_mass or []
         for pos in range(len(response_ids)):
             value = logprobs[pos] if pos < len(logprobs) else None
             response_slots.append(float(value) if isinstance(value, (int, float)) else None)
+            support_slots.append(list(supports[pos]) if pos < len(supports) else None)
+            support_mass_slots.append(
+                float(support_masses[pos]) if pos < len(support_masses) else None
+            )
 
     @staticmethod
     def _finalize_logprobs(
@@ -328,6 +361,26 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # Interstitial slots (tool results, chat glue) get 0.0; loss_mask=0
         # makes the trainer ignore them.
         return [slot if slot is not None else 0.0 for slot in slots]
+
+    @staticmethod
+    def _finalize_support(
+        support_slots: list[list[int] | None],
+        mass_slots: list[float | None],
+        loss_mask: list[int],
+    ) -> tuple[list[list[int]] | None, list[float] | None]:
+        if len(support_slots) != len(loss_mask) or len(mass_slots) != len(loss_mask):
+            raise ValueError("sampling support slots must align with loss_mask")
+        if not any(slot for slot in support_slots):
+            return None, None
+        if any(
+            mask and (not support or mass is None)
+            for support, mass, mask in zip(support_slots, mass_slots, loss_mask)
+        ):
+            raise ValueError("sampling support must cover every trainable token")
+        return (
+            [list(slot or []) for slot in support_slots],
+            [float(mass or 0.0) for mass in mass_slots],
+        )
 
     @staticmethod
     def _chain_metadata(chain: list[CompletionRecord]) -> dict[str, Any]:

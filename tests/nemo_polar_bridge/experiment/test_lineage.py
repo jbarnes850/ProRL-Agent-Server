@@ -44,7 +44,7 @@ def test_register_writes_record_and_digests_are_deterministic(tmp_path):
     assert (tmp_path / f"{GRPO_ID}.json").exists()
     assert rec.spec_id == GRPO_ID
     assert rec.parent is None
-    assert rec.base_config.endswith("grpo-qwen3-0.6b-1n8g-sglang.yaml")
+    assert rec.base_config.endswith("grpo_math_1B_sglang.yaml")
     # same spec -> same digest (canonical, order-independent)
     assert spec_digest(grpo_spec()) == spec_digest(grpo_spec())
     assert rec.spec_digest == spec_digest(grpo_spec())

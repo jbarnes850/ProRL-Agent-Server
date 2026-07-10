@@ -111,6 +111,9 @@ class BaseTransformer(ABC):
         token ids) are added later by the inference engine.
         """
         request.pop("_polar_model_served", None)
+        # Reserved trajectory-control metadata is captured in original_request
+        # but must never be forwarded to vLLM/SGLang as an unknown API field.
+        request.pop("_polar_compaction", None)
 
         request = self._merge_developer_role(request)
 

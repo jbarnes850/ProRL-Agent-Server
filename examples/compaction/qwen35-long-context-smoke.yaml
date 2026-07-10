@@ -1,0 +1,194 @@
+task_id: qwen35-stage5-compaction-r1
+instruction: Preserve a long scientific working state through model-authored compaction.
+num_samples: 1
+timeout_seconds: 900
+runtime:
+  backend: docker
+  image: polar-spark-calculator:latest
+  network: host
+  workdir: /polar/session/workspace
+  prepare:
+    - type: exec
+      command: mkdir -p /polar/session/workspace /polar/session/artifacts
+agent:
+  harness: shell
+  model_name: Qwen/Qwen3.5-9B
+  custom_shell:
+    command: |
+      python3 - <<'PY'
+      import json
+      import os
+      import re
+      import urllib.request
+      from pathlib import Path
+
+      base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+      api_key = os.environ["OPENAI_API_KEY"]
+      model = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.5-9B")
+      workspace = Path("/polar/session/workspace")
+      artifacts = Path(os.environ.get("ARTIFACTS_DIR", "/polar/session/artifacts"))
+      workspace.mkdir(parents=True, exist_ok=True)
+      artifacts.mkdir(parents=True, exist_ok=True)
+
+      facts = [
+          "sample_id ALPHA-17",
+          "phase candidate monoclinic P21/c",
+          "pressure 7.35 GPa",
+          "rejected candidate rutile because residual 0.184",
+          "next calculation refine oxygen occupancy constrained 0.97",
+      ]
+      filler = " x" * 116000
+      long_state = (
+          "Scientific working state. Preserve every named fact exactly.\n"
+          + facts[0]
+          + "\n"
+          + facts[1]
+          + filler[: len(filler) // 2]
+          + "\n"
+          + facts[2]
+          + "\n"
+          + facts[3]
+          + filler[len(filler) // 2 :]
+          + "\n"
+          + facts[4]
+      )
+
+      def complete(messages, max_tokens, marker=None):
+          payload = {
+              "model": model,
+              "messages": messages,
+              "max_tokens": max_tokens,
+              "temperature": 0.0,
+              "top_p": 1.0,
+          }
+          if marker is not None:
+              payload["_polar_compaction"] = marker
+          request = urllib.request.Request(
+              base + "/chat/completions",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": "Bearer " + api_key,
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=600) as response:
+              return json.loads(response.read())
+
+      initial_messages = [
+          {
+              "role": "system",
+              "content": "Maintain scientific state exactly and never invent measurements.",
+          },
+          {
+              "role": "user",
+              "content": long_state + "\nAcknowledge the next calculation in one sentence.",
+          },
+      ]
+      first = complete(initial_messages, 64)
+      first_text = first["choices"][0]["message"].get("content", "")
+
+      summary_messages = [
+          *initial_messages,
+          {"role": "assistant", "content": first_text},
+          {
+              "role": "user",
+              "content": (
+                  "Compact the working state. Preserve the original goal, every exact "
+                  "identifier, measurement, accepted/rejected hypothesis with reason, "
+                  "constraint, completed action, unresolved issue, and next step. "
+                  "Return only the compact working-state summary."
+              ),
+          },
+      ]
+      summary = complete(
+          summary_messages,
+          384,
+          {
+              "event_id": "cmp-1",
+              "phase": "summary",
+              "context_limit": 131072,
+              "threshold_remaining_tokens": 20000,
+              "recent_turns_to_keep": 1,
+              "policy_version": "stage5-r1",
+          },
+      )
+      summary_text = summary["choices"][0]["message"].get("content", "")
+
+      resume_messages = [
+          {
+              "role": "system",
+              "content": "Resume only from the supplied compact scientific state.",
+          },
+          {"role": "user", "content": "Original goal: preserve and act on the scientific state."},
+          {"role": "assistant", "content": summary_text},
+          {
+              "role": "user",
+              "content": (
+                  "Return JSON with sample_id, phase_candidate, pressure_gpa, "
+                  "rejected_candidate, rejection_reason, and next_calculation."
+              ),
+          },
+      ]
+      resumed = complete(
+          resume_messages,
+          256,
+          {"event_id": "cmp-1", "phase": "resume"},
+      )
+      resumed_text = resumed["choices"][0]["message"].get("content", "")
+
+      summary_lines = [line.casefold() for line in summary_text.splitlines()]
+      next_lines = [line for line in summary_lines if "next" in line]
+      summary_lower = summary_text.casefold()
+      summary_checks = {
+          "sample_id": "alpha-17" in summary_lower,
+          "phase_candidate": "p21/c" in summary_lower,
+          "pressure": "7.35" in summary_lower and "gpa" in summary_lower,
+          "rejected_candidate": all(
+              needle in summary_lower for needle in ("rutile", "residual", "0.184")
+          ),
+          "pending_next_calculation": any(
+              "0.97" in line and re.search(r"refin|occupancy", line)
+              for line in next_lines
+          ),
+      }
+      resumed_needles = ["ALPHA-17", "P21/c", "7.35", "rutile", "0.184", "0.97"]
+      resume_checks = {
+          needle: needle.casefold() in resumed_text.casefold()
+          for needle in resumed_needles
+      }
+      passed = all(summary_checks.values()) and all(resume_checks.values())
+      verifier = {
+          "reward": 1.0 if passed else 0.0,
+          "passed": passed,
+          "verifier": "deterministic_scientific_state_retention",
+          "read_only": True,
+          "summary_checks": summary_checks,
+          "resume_checks": resume_checks,
+      }
+      payload = {
+          "first": first,
+          "summary": summary,
+          "resumed": resumed,
+          "verifier": verifier,
+      }
+      (workspace / "verifier_result.json").write_text(
+          json.dumps(verifier, indent=2, sort_keys=True)
+      )
+      (artifacts / "compaction_smoke.json").write_text(
+          json.dumps(payload, indent=2, sort_keys=True)
+      )
+      print(json.dumps(verifier, sort_keys=True))
+      PY
+builder:
+  strategy: compaction_segments
+evaluator:
+  strategy: verifier_result_file
+  config:
+    path: /polar/session/workspace/verifier_result.json
+    reward_key: reward
+metadata:
+  purpose: Stage 5 long-context compaction artifact smoke; no training
+  validation_mode: infrastructure
+  workload: 131K engine with approximately 116K-token shared prefix
+  verifier_contract: deterministic read-only retention checks over model summary and resumed answer

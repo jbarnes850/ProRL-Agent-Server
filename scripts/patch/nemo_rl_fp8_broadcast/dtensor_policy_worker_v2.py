@@ -63,6 +63,9 @@ from nemo_rl.models.automodel.train import (
     automodel_forward_backward,
     forward_with_post_processing_fn,
 )
+from nemo_polar_bridge.sampling_support import (
+    install_nemo_worker_sampling_support_patch,
+)
 from nemo_rl.models.policy import PolicyConfig
 from nemo_rl.models.policy.interfaces import (
     ColocatablePolicyInterface,
@@ -87,6 +90,13 @@ from nemo_rl.utils.fp8_broadcast_quant import (
 )
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.packed_tensor import packed_broadcast_producer
+
+
+_recorded_support_logprobs_post_processor = (
+    install_nemo_worker_sampling_support_patch()
+)
+if _recorded_support_logprobs_post_processor is not None:
+    LogprobsPostProcessor = _recorded_support_logprobs_post_processor
 
 
 # Refit-phase profiling (NRL_REFIT_PROFILE=1): time the optimizer offload/onload

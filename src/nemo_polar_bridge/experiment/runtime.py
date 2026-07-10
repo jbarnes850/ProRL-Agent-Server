@@ -154,6 +154,10 @@ def _env_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _env_flag(value: bool) -> str:
+    return "1" if value else "0"
+
+
 def compose_launch(
     spec: ExperimentSpec,
     profile: RuntimeProfile,
@@ -183,6 +187,11 @@ def compose_launch(
     env["POLAR_MODEL_MAX_MODEL_LEN"] = str(model.max_total_sequence_length)
     env["POLAR_MODEL_TEMPERATURE"] = str(spec.rollout.temperature)
     env["POLAR_MODEL_TOP_P"] = str(spec.rollout.top_p)
+    env["NRL_TOP_P_SUPPORT_REPLAY"] = _env_flag(
+        spec.rollout.sampling_support_replay
+    )
+    env["NRL_TOP_P_SUPPORT_SIZE"] = str(spec.rollout.sampling_support_size)
+    env["NRL_ALLOW_NAIVE_TOP_P"] = _env_flag(spec.rollout.allow_naive_top_p)
     env["NEMO_VLLM_PRECISION"] = spec.precision.rollout
     env["NEMO_VLLM_KV_CACHE_DTYPE"] = spec.precision.kv_cache_dtype
     if spec.vllm_runtime.gpu_memory_utilization is not None:

@@ -127,3 +127,67 @@ def test_vllm_normalize_skips_token_id_stamp_on_length_mismatch() -> None:
     }
     content = VLLMEngine().normalize_response(response)["choices"][0]["logprobs"]["content"]
     assert "token_id" not in content[0]
+
+
+def test_vllm_sampling_support_capture_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLAR_VLLM_CAPTURE_SAMPLING_SUPPORT", "1")
+    monkeypatch.setenv("POLAR_VLLM_SAMPLING_SUPPORT_SIZE", "256")
+    request = VLLMEngine().prepare_request({"messages": [], "top_p": 0.95})
+    assert request["top_logprobs"] == 256
+
+    response = {
+        "choices": [
+            {
+                "token_ids": [10],
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "token_id:10",
+                            "token_id": 10,
+                            "logprob": -0.2231435513,
+                            "top_logprobs": [
+                                {"token": "token_id:10", "logprob": -0.2231435513},
+                                {"token": "token_id:11", "logprob": -1.6094379124},
+                                {"token": "token_id:12", "logprob": -9999.0},
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    content = VLLMEngine().normalize_response(response)["choices"][0]["logprobs"][
+        "content"
+    ]
+    assert content[0]["sampling_support_token_ids"] == [10, 11]
+    assert content[0]["sampling_support_mass"] == pytest.approx(1.0)
+    assert "top_logprobs" not in content[0]
+
+
+def test_vllm_sampling_support_rejects_incomplete_mass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLAR_VLLM_CAPTURE_SAMPLING_SUPPORT", "1")
+    response = {
+        "choices": [
+            {
+                "token_ids": [10],
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "token_id:10",
+                            "token_id": 10,
+                            "logprob": -0.1,
+                            "top_logprobs": [
+                                {"token": "token_id:10", "logprob": -0.1}
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="incomplete vLLM sampling support"):
+        VLLMEngine().normalize_response(response)

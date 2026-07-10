@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from polar.gateway.engine import SGLangEngine, VLLMEngine
 from polar.trajectory.builder.per_request import PerRequestBuilder
 from polar.trajectory.builder.prefix_merging import PrefixMergingBuilder
@@ -209,6 +211,52 @@ def test_sglang_normalization_recovers_aligned_logprobs_from_meta_info() -> None
     assert trace.response_logprobs == [-0.1, -0.2, -0.3]
 
 
+def test_vllm_sampling_support_reaches_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLAR_VLLM_CAPTURE_SAMPLING_SUPPORT", "1")
+    response = {
+        "prompt_token_ids": [1, 2],
+        "choices": [
+            {
+                "token_ids": [10, 11],
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "token_id:10",
+                            "logprob": 0.0,
+                            "top_logprobs": [
+                                {"token": "token_id:10", "logprob": 0.0}
+                            ],
+                        },
+                        {
+                            "token": "token_id:11",
+                            "logprob": -0.2231435513,
+                            "top_logprobs": [
+                                {"token": "token_id:11", "logprob": -0.2231435513},
+                                {"token": "token_id:12", "logprob": -1.6094379124},
+                            ],
+                        },
+                    ]
+                },
+            }
+        ],
+    }
+    normalized = VLLMEngine().normalize_response(response)
+    trace = build_trace_from_completion(
+        CompletionRecord(
+            completion_id="support",
+            request={"messages": [{"role": "user", "content": "go"}]},
+            response=normalized,
+        )
+    )
+
+    assert trace.sampling_support_token_ids == [[10], [11, 12]]
+    assert trace.sampling_support_mass == pytest.approx([1.0, 1.0])
+
+
 def test_per_request_builder_is_identical_across_engines() -> None:
     common = dict(
         prompt_ids=[1, 2, 3],
@@ -308,6 +356,38 @@ def test_prefix_merging_chain_is_identical_across_engines() -> None:
     assert vllm.traces[0].response_ids == [10, 11, _EOT, 50, 51, 20, 21, _EOT]
     assert vllm.traces[0].loss_mask == [1, 1, 1, 0, 0, 1, 1, 1]
     assert vllm.traces[0].response_logprobs == [-0.1, -0.2, -0.3, 0.0, 0.0, -0.5, -0.6, -0.7]
+
+
+def test_prefix_merging_preserves_sampling_support() -> None:
+    records = _two_turn_chain(_vllm_record)
+    supports = [
+        [[10], [11, 12], [_EOT]],
+        [[20, 22], [21], [_EOT, 23]],
+    ]
+    for record, record_supports in zip(records, supports):
+        content = record.response["choices"][0]["logprobs"]["content"]
+        for entry, support in zip(content, record_supports):
+            entry["sampling_support_token_ids"] = support
+            entry["sampling_support_mass"] = 1.0
+
+    trajectory = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=_EOT).build(
+            CompletionSession(session_id="s", completions=records)
+        )
+    )
+    trace = trajectory.traces[0]
+
+    assert trace.sampling_support_token_ids == [
+        [10],
+        [11, 12],
+        [_EOT],
+        [],
+        [],
+        [20, 22],
+        [21],
+        [_EOT, 23],
+    ]
+    assert trace.sampling_support_mass == [1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
 
 
 def test_prefix_merging_drops_logprobs_when_trainable_token_is_missing_logprob() -> None:

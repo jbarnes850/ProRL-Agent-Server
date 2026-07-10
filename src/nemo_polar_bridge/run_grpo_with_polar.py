@@ -6,9 +6,10 @@ import os
 import runpy
 from typing import Any
 
-import nemo_rl.algorithms.async_utils as async_utils
-
 from nemo_polar_bridge.collector import PolarAsyncTrajectoryCollector
+from nemo_polar_bridge.sampling_support import (
+    install_c236_grpo_sampling_support_patch,
+)
 
 
 def _pin_virtual_cluster_placement() -> None:
@@ -42,6 +43,9 @@ def _pin_virtual_cluster_placement() -> None:
 
 
 def main() -> None:
+    install_c236_grpo_sampling_support_patch()
+    import nemo_rl.algorithms.async_utils as async_utils
+
     _pin_virtual_cluster_placement()
     async_utils.AsyncTrajectoryCollector = PolarAsyncTrajectoryCollector
     runpy.run_path("/opt/nemo-rl/examples/run_grpo.py", run_name="__main__")

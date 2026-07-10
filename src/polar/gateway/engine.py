@@ -26,6 +26,9 @@ plus a light response normalization. vLLM reaches it natively via the
 from __future__ import annotations
 
 from abc import ABC
+import math
+import os
+import re
 from typing import Any
 
 
@@ -147,10 +150,28 @@ class VLLMEngine(InferenceEngine):
 
     name = "vllm"
 
+    @staticmethod
+    def _sampling_support_enabled() -> bool:
+        return os.environ.get("POLAR_VLLM_CAPTURE_SAMPLING_SUPPORT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
     def prepare_request(self, request: dict[str, Any]) -> dict[str, Any]:
         request = super().prepare_request(request)  # logprobs=True
         request["return_token_ids"] = True
-        request.setdefault("top_logprobs", 0)
+        if self._sampling_support_enabled() and float(request.get("top_p", 1.0)) < 1.0:
+            support_cap = int(os.environ.get("POLAR_VLLM_SAMPLING_SUPPORT_SIZE", "0"))
+            if support_cap <= 0:
+                raise ValueError(
+                    "POLAR_VLLM_SAMPLING_SUPPORT_SIZE must be positive when "
+                    "sampling-support capture is enabled with top_p < 1"
+                )
+            request["top_logprobs"] = support_cap
+        else:
+            request.setdefault("top_logprobs", 0)
         # vLLM reads input reasoning from `reasoning`, not Polar's canonical
         # `reasoning_content`; rename it so prior turns' interleaved thinking
         # survives templating (else they render an empty `<think></think>`).
@@ -168,7 +189,84 @@ class VLLMEngine(InferenceEngine):
                 continue
             self._canonicalize_reasoning(choice.get("message"))
             self._stamp_token_ids_onto_logprobs(choice)
+            if self._sampling_support_enabled():
+                self._extract_sampling_support(choice)
         return response
+
+    @staticmethod
+    def _top_logprob_token_id(item: dict[str, Any]) -> int | None:
+        token_id = item.get("token_id")
+        if token_id is not None:
+            try:
+                return int(token_id)
+            except (TypeError, ValueError):
+                return None
+        token = item.get("token")
+        if not isinstance(token, str):
+            return None
+        match = re.fullmatch(r"token_id:(\d+)", token)
+        return int(match.group(1)) if match else None
+
+    @classmethod
+    def _extract_sampling_support(cls, choice: dict[str, Any]) -> None:
+        logprobs = choice.get("logprobs")
+        content = logprobs.get("content") if isinstance(logprobs, dict) else None
+        if not isinstance(content, list):
+            raise ValueError("vLLM response is missing token-aligned logprobs content")
+
+        tolerance = float(os.environ.get("POLAR_VLLM_SAMPLING_SUPPORT_MASS_TOL", "1e-5"))
+        for position, entry in enumerate(content):
+            if not isinstance(entry, dict):
+                raise ValueError(f"invalid vLLM logprob entry at position {position}")
+            top_logprobs = entry.get("top_logprobs")
+            if not isinstance(top_logprobs, list) or not top_logprobs:
+                raise ValueError(
+                    f"vLLM response is missing sampling support at position {position}"
+                )
+
+            support_ids: list[int] = []
+            support_mass = 0.0
+            for item in top_logprobs:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    logprob = float(item.get("logprob"))
+                except (TypeError, ValueError):
+                    continue
+                # vLLM clamps filtered -inf values to -9999 in OpenAI responses.
+                if not math.isfinite(logprob) or logprob <= -9000.0:
+                    continue
+                token_id = cls._top_logprob_token_id(item)
+                if token_id is None:
+                    raise ValueError(
+                        "vLLM sampling support requires token-id responses; "
+                        f"position {position} contained {item.get('token')!r}"
+                    )
+                support_ids.append(token_id)
+                support_mass += math.exp(logprob)
+
+            if not support_ids:
+                raise ValueError(f"empty vLLM sampling support at position {position}")
+            if abs(1.0 - support_mass) > tolerance:
+                raise ValueError(
+                    "incomplete vLLM sampling support at position "
+                    f"{position}: mass={support_mass:.9f} tolerance={tolerance}"
+                )
+
+            sampled_token_id = entry.get("token_id")
+            if sampled_token_id is None or int(sampled_token_id) not in support_ids:
+                raise ValueError(
+                    f"sampled token is outside recorded support at position {position}"
+                )
+            entry["sampling_support_token_ids"] = support_ids
+            entry["sampling_support_mass"] = support_mass
+            if os.environ.get("POLAR_VLLM_KEEP_RAW_TOP_LOGPROBS", "").strip().lower() not in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                entry.pop("top_logprobs", None)
 
     @staticmethod
     def _canonicalize_reasoning(message: Any) -> None:

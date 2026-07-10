@@ -107,6 +107,40 @@ def _extract_response_tokens(
     return [], None
 
 
+def _extract_sampling_support(
+    choice: dict[str, Any],
+) -> tuple[list[list[int]], list[float]] | None:
+    logprobs = choice.get("logprobs")
+    content = logprobs.get("content") if isinstance(logprobs, dict) else None
+    if not isinstance(content, list) or not content:
+        return None
+
+    supports: list[list[int]] = []
+    masses: list[float] = []
+    saw_support = False
+    for item in content:
+        if not isinstance(item, dict):
+            return None
+        raw_support = item.get("sampling_support_token_ids")
+        raw_mass = item.get("sampling_support_mass")
+        if raw_support is None and raw_mass is None:
+            supports.append([])
+            masses.append(0.0)
+            continue
+        saw_support = True
+        support = _coerce_int_list(raw_support)
+        if not support or raw_mass is None:
+            raise ValueError("sampling support metadata must be complete and nonempty")
+        supports.append(support)
+        masses.append(float(raw_mass))
+
+    if not saw_support:
+        return None
+    if any(not support for support in supports):
+        raise ValueError("sampling support metadata must cover every generated token")
+    return supports, masses
+
+
 def _extract_prompt_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
     messages = request.get("messages")
     if not isinstance(messages, list):
@@ -142,6 +176,7 @@ def build_trace_from_completion(completion: CompletionRecord) -> Trace:
     finish_reason = first_choice.get("finish_reason")
 
     response_ids, response_logprobs = _extract_response_tokens(response, first_choice)
+    sampling_support = _extract_sampling_support(first_choice)
 
     return Trace(
         prompt_ids=list(prompt_ids) if isinstance(prompt_ids, list) else [],
@@ -152,5 +187,11 @@ def build_trace_from_completion(completion: CompletionRecord) -> Trace:
         tools=_extract_tools(request),
         finish_reason=str(finish_reason) if finish_reason is not None else None,
         response_logprobs=response_logprobs,
+        sampling_support_token_ids=(
+            sampling_support[0] if sampling_support is not None else None
+        ),
+        sampling_support_mass=(
+            sampling_support[1] if sampling_support is not None else None
+        ),
         metadata=deepcopy(completion.metadata),
     )

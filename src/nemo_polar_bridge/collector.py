@@ -175,6 +175,9 @@ def _assistant_segments(
     response_logprobs: list[float],
     loss_mask: list[int],
     fallback_text: str,
+    sampling_support_token_ids: list[list[int]] | None = None,
+    sampling_support_mass: list[float] | None = None,
+    support_width: int = 0,
 ) -> list[dict[str, Any]]:
     """Split assistant tokens so NeMo can preserve Polar's per-token loss mask."""
 
@@ -186,6 +189,12 @@ def _assistant_segments(
         raise ValueError("response_logprobs length must match response_ids")
     if len(loss_mask) != len(response_ids):
         raise ValueError("loss_mask length must match response_ids")
+    if sampling_support_token_ids is not None and len(sampling_support_token_ids) != len(
+        response_ids
+    ):
+        raise ValueError("sampling support length must match response_ids")
+    if sampling_support_mass is not None and len(sampling_support_mass) != len(response_ids):
+        raise ValueError("sampling support mass length must match response_ids")
 
     messages: list[dict[str, Any]] = []
     start = 0
@@ -210,6 +219,37 @@ def _assistant_segments(
                 logprob_slice,
                 dtype=torch.float32,
             )
+        if support_width > 0:
+            support_tensor = torch.full(
+                (len(token_slice), support_width),
+                -1,
+                dtype=torch.int32,
+            )
+            support_lengths = torch.zeros(len(token_slice), dtype=torch.int32)
+            support_mass_tensor = torch.zeros(len(token_slice), dtype=torch.float32)
+            for local_pos, global_pos in enumerate(range(start, end)):
+                support = (
+                    sampling_support_token_ids[global_pos]
+                    if sampling_support_token_ids is not None
+                    else []
+                )
+                if len(support) > support_width:
+                    raise ValueError(
+                        f"sampling support size {len(support)} exceeds width {support_width}"
+                    )
+                if support:
+                    support_tensor[local_pos, : len(support)] = torch.tensor(
+                        support,
+                        dtype=torch.int32,
+                    )
+                    support_lengths[local_pos] = len(support)
+                if sampling_support_mass is not None:
+                    support_mass_tensor[local_pos] = float(
+                        sampling_support_mass[global_pos]
+                    )
+            message["sampling_support_token_ids"] = support_tensor
+            message["sampling_support_lengths"] = support_lengths
+            message["sampling_support_mass"] = support_mass_tensor
         messages.append(message)
         start = end
     return messages
@@ -274,6 +314,9 @@ def _flatten_traces_for_nemo(
     prompt_ids = list(first_trace.get("prompt_ids") or [])
     response_ids: list[int] = []
     response_logprobs: list[float] = []
+    sampling_support_token_ids: list[list[int]] = []
+    sampling_support_mass: list[float] = []
+    saw_sampling_support = False
     loss_mask: list[int] = []
     response_messages: list[dict[str, Any]] = []
     finish_reason: str | None = None
@@ -291,6 +334,8 @@ def _flatten_traces_for_nemo(
                 )
             response_ids.extend(interstitial_ids)
             response_logprobs.extend([0.0] * len(interstitial_ids))
+            sampling_support_token_ids.extend([[] for _ in interstitial_ids])
+            sampling_support_mass.extend([0.0] * len(interstitial_ids))
             loss_mask.extend([0] * len(interstitial_ids))
 
         turn_response_ids = list(trace.get("response_ids") or [])
@@ -299,8 +344,21 @@ def _flatten_traces_for_nemo(
             turn_logprobs = []
         turn_logprobs = [float(value) for value in turn_logprobs]
         turn_loss_mask = [int(value) for value in (trace.get("loss_mask") or [])]
+        turn_support = trace.get("sampling_support_token_ids") or []
+        turn_support_mass = trace.get("sampling_support_mass") or []
+        saw_sampling_support = saw_sampling_support or bool(turn_support)
         response_ids.extend(turn_response_ids)
         response_logprobs.extend(turn_logprobs)
+        sampling_support_token_ids.extend(
+            [list(value) for value in turn_support]
+            if turn_support
+            else [[] for _ in turn_response_ids]
+        )
+        sampling_support_mass.extend(
+            [float(value) for value in turn_support_mass]
+            if turn_support_mass
+            else [0.0 for _ in turn_response_ids]
+        )
         loss_mask.extend(turn_loss_mask)
         response_messages.extend(list(trace.get("response_messages") or []))
         finish_reason = trace.get("finish_reason") or finish_reason
@@ -308,7 +366,7 @@ def _flatten_traces_for_nemo(
     reward = _first_non_none([trace.get("reward") for trace in reversed(traces)])
     if reward is None:
         reward = outcome_reward
-    return {
+    flattened = {
         "prompt_ids": prompt_ids,
         "response_ids": response_ids,
         "loss_mask": loss_mask,
@@ -323,10 +381,20 @@ def _flatten_traces_for_nemo(
             "reconstruction_warnings": reconstruction_warnings,
         },
     }
+    if saw_sampling_support:
+        flattened["sampling_support_token_ids"] = sampling_support_token_ids
+        flattened["sampling_support_mass"] = sampling_support_mass
+    return flattened
 
 
 def _result_trace(result: dict[str, Any], tokenizer: Any) -> tuple[dict[str, Any], bool]:
     trajectory = result.get("trajectory") or {}
+    if trajectory.get("compaction_events"):
+        raise ValueError(
+            "compaction trajectories require a segment-aware trainer with "
+            "token-level loss normalization and cross-boundary credit assignment; "
+            "the current NeMo GRPO/CISPO collector must not flatten them"
+        )
     traces = trajectory.get("traces") or []
     if not traces:
         return _dummy_trace(tokenizer), False
@@ -340,6 +408,25 @@ def _result_trace(result: dict[str, Any], tokenizer: Any) -> tuple[dict[str, Any
     response_ids = list(trace.get("response_ids") or [])
     response_logprobs = list(trace.get("response_logprobs") or [])
     loss_mask = [int(value) for value in (trace.get("loss_mask") or [])]
+    support_ids = trace.get("sampling_support_token_ids")
+    support_mass = trace.get("sampling_support_mass")
+    support_required = env_flag("NEMO_POLAR_REQUIRE_SAMPLING_SUPPORT_REPLAY")
+    support_valid = (
+        isinstance(support_ids, list)
+        and len(support_ids) == len(response_ids)
+        and isinstance(support_mass, list)
+        and len(support_mass) == len(response_ids)
+        and all(
+            loss_mask[index] == 0
+            or (
+                isinstance(support_ids[index], list)
+                and bool(support_ids[index])
+                and abs(float(support_mass[index]) - 1.0) <= 1e-5
+                and response_ids[index] in support_ids[index]
+            )
+            for index in range(len(response_ids))
+        )
+    )
     valid = (
         str(result.get("status")) == "COMPLETED"
         and bool(prompt_ids)
@@ -348,6 +435,7 @@ def _result_trace(result: dict[str, Any], tokenizer: Any) -> tuple[dict[str, Any
         and len(loss_mask) == len(response_ids)
         and any(value == 1 for value in loss_mask)
         and trace.get("reward") is not None
+        and (not support_required or support_valid)
     )
     if valid:
         return trace, True
@@ -368,6 +456,34 @@ def build_nemo_trajectory_group(
     import torch
     from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
+    collected: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+    for task_result in task_results:
+        for result in task_result.get("results") or []:
+            trace, valid = _result_trace(result, tokenizer)
+            collected.append((result, trace, valid))
+    if not collected:
+        raise ValueError("Polar task results did not contain any sessions")
+
+    support_width = max(
+        (
+            len(support)
+            for _, trace, _ in collected
+            for support in (trace.get("sampling_support_token_ids") or [])
+        ),
+        default=0,
+    )
+    configured_support_width = env_int(
+        "NEMO_POLAR_SAMPLING_SUPPORT_SIZE",
+        default=0,
+    )
+    if configured_support_width:
+        if support_width > configured_support_width:
+            raise ValueError(
+                f"observed support width {support_width} exceeds configured "
+                f"NEMO_POLAR_SAMPLING_SUPPORT_SIZE={configured_support_width}"
+            )
+        support_width = configured_support_width
+
     message_logs: list[list[dict[str, Any]]] = []
     lengths: list[int] = []
     loss_multiplier: list[float] = []
@@ -377,44 +493,63 @@ def build_nemo_trajectory_group(
     valid_count = 0
     trace_count = 0
 
-    for task_result in task_results:
-        for result in task_result.get("results") or []:
-            trace, valid = _result_trace(result, tokenizer)
-            prompt_ids = list(trace.get("prompt_ids") or [])
-            response_ids = list(trace.get("response_ids") or [])
-            response_logprobs = [float(x) for x in (trace.get("response_logprobs") or [])]
-            loss_mask = [int(x) for x in (trace.get("loss_mask") or [])]
+    for result, trace, valid in collected:
+        prompt_ids = list(trace.get("prompt_ids") or [])
+        response_ids = list(trace.get("response_ids") or [])
+        response_logprobs = [
+            float(x) for x in (trace.get("response_logprobs") or [])
+        ]
+        loss_mask = [int(x) for x in (trace.get("loss_mask") or [])]
 
-            prompt_text = _message_text(trace.get("prompt_messages"))
-            response_text = _message_text(trace.get("response_messages"))
-            message_log: list[dict[str, Any]] = [
-                {
-                    "role": "user",
-                    "content": prompt_text,
-                    "token_ids": torch.tensor(prompt_ids, dtype=torch.long),
-                }
-            ]
-            message_log.extend(
-                _assistant_segments(
-                    tokenizer=tokenizer,
-                    response_ids=response_ids,
-                    response_logprobs=response_logprobs,
-                    loss_mask=loss_mask,
-                    fallback_text=response_text,
-                )
+        prompt_text = _message_text(trace.get("prompt_messages"))
+        response_text = _message_text(trace.get("response_messages"))
+        message_log: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": prompt_text,
+                "token_ids": torch.tensor(prompt_ids, dtype=torch.long),
+            }
+        ]
+        if support_width > 0:
+            message_log[0]["sampling_support_token_ids"] = torch.full(
+                (len(prompt_ids), support_width),
+                -1,
+                dtype=torch.int32,
             )
-            message_logs.append(message_log)
-            lengths.append(len(prompt_ids))
-            loss_multiplier.append(1.0 if valid else 0.0)
-            reward = float(trace.get("reward") or 0.0)
-            total_reward.append(reward)
-            truncated.append(False)
-            completion_count += int((result.get("trajectory") or {}).get("metadata", {}).get("record_count") or 0)
-            trace_count += int((trace.get("metadata") or {}).get("polar_trace_count") or 1)
-            valid_count += int(valid)
-
-    if not message_logs:
-        raise ValueError("Polar task results did not contain any sessions")
+            message_log[0]["sampling_support_lengths"] = torch.zeros(
+                len(prompt_ids),
+                dtype=torch.int32,
+            )
+            message_log[0]["sampling_support_mass"] = torch.zeros(
+                len(prompt_ids),
+                dtype=torch.float32,
+            )
+        message_log.extend(
+            _assistant_segments(
+                tokenizer=tokenizer,
+                response_ids=response_ids,
+                response_logprobs=response_logprobs,
+                loss_mask=loss_mask,
+                fallback_text=response_text,
+                sampling_support_token_ids=trace.get("sampling_support_token_ids"),
+                sampling_support_mass=trace.get("sampling_support_mass"),
+                support_width=support_width,
+            )
+        )
+        message_logs.append(message_log)
+        lengths.append(len(prompt_ids))
+        loss_multiplier.append(1.0 if valid else 0.0)
+        reward = float(trace.get("reward") or 0.0)
+        total_reward.append(reward)
+        truncated.append(False)
+        completion_count += int(
+            (result.get("trajectory") or {}).get("metadata", {}).get("record_count")
+            or 0
+        )
+        trace_count += int(
+            (trace.get("metadata") or {}).get("polar_trace_count") or 1
+        )
+        valid_count += int(valid)
 
     batch = BatchedDataDict(
         {
@@ -482,7 +617,19 @@ class _PolarAsyncTrajectoryCollector:
         master_config: Any,
         replay_buffer: Any,
         start_step: int = 0,
+        teacher_worker_groups: dict[str, Any] | None = None,
+        alias_to_group_alias: dict[str, str] | None = None,
+        on_policy_distillation_cfg: dict[str, Any] | None = None,
     ) -> None:
+        # NeMo main added these optional constructor arguments for MOPD. Polar's
+        # external collector is valid for the ordinary CISPO/GRPO path but does
+        # not yet recompute teacher logprobs. Accept the empty values passed by
+        # current main and fail closed if a future experiment enables teachers.
+        if teacher_worker_groups or alias_to_group_alias or on_policy_distillation_cfg:
+            raise NotImplementedError(
+                "PolarAsyncTrajectoryCollector does not support on-policy "
+                "distillation teacher metadata"
+            )
         del task_to_env
         self.policy_generation = policy_generation
         self.tokenizer = tokenizer
@@ -579,6 +726,23 @@ class _PolarAsyncTrajectoryCollector:
             )
 
     def resume_after_refit(self) -> None:
+        async_cfg = self.master_config.grpo.get("async_grpo", {})
+        if async_cfg.get("in_flight_weight_updates", False) and async_cfg.get(
+            "recompute_kv_cache_after_weight_updates", False
+        ):
+            print("🔄 Invalidating vLLM prefix/KV caches after weight update")
+            try:
+                invalidated = self.policy_generation.invalidate_kv_cache()
+            except Exception as exc:
+                raise RuntimeError(
+                    "vLLM prefix/KV cache invalidation failed after weight update"
+                ) from exc
+            if not invalidated:
+                raise RuntimeError(
+                    "vLLM prefix/KV cache invalidation was not successful on all workers"
+                )
+            print("✅ Invalidated vLLM prefix/KV caches after weight update")
+
         print("🔄 Polar collector resuming gateway generation after NeMo refit")
         if self._gateway_url:
             _post_control(f"{self._gateway_url}/admin/inference/resume", timeout=30)
@@ -590,6 +754,17 @@ class _PolarAsyncTrajectoryCollector:
                 return self.dataloader.state_dict()
             except Exception:
                 return {}
+        return {}
+
+    def get_efficiency_metrics(self) -> dict[str, float]:
+        """Return NeMo-main-compatible collector timing metrics.
+
+        Polar request and gateway timings are persisted by the rollout service;
+        this bridge does not duplicate those durations into NeMo's timer tree.
+        Returning an empty mapping is the exact neutral element expected by the
+        driver's efficiency merge.
+        """
+
         return {}
 
     def start_collection(self, dataloader: Any) -> None:

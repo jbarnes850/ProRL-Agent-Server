@@ -1,0 +1,82 @@
+# Qwen3.5-9B Stage 3 gate: one reward-bearing group, native NeMo Async CISPO,
+# BF16 trainer on one Spark and FP8 vLLM rollout on the other. Training stays
+# at 4K for the first live integration smoke; the disaggregated vLLM runtime
+# retains the independently proven 131K serving contract.
+id: qwen3p5-9b-reasoning_gym-cispo-fp8-rollout-1x8-smoke
+
+model:
+  name: Qwen/Qwen3.5-9B
+  nemo_path: /models/Qwen/Qwen3.5-9B
+  max_total_sequence_length: 4096
+
+dataset:
+  family: reasoning_gym
+
+verifier:
+  type: exact_answer
+  execution: single_turn_chat
+
+algorithm:
+  name: cispo
+
+async_grpo:
+  lag: 1
+  in_flight_weight_updates: true
+  recompute_kv_cache: true
+
+rollout:
+  prompts_per_step: 1
+  generations_per_prompt: 8
+  max_steps: 1
+  temperature: 1.0
+  top_p: 1.0
+
+precision:
+  train: bfloat16
+  rollout_backend: vllm
+  rollout: fp8
+  kv_cache_dtype: auto
+
+trainer:
+  # Full fine-tuning is a hard no-fit on one 121.7 GiB unified-memory Spark:
+  # the 8.954B text backbone alone needs ~133 GiB for FP32 master weights,
+  # gradients, and two Adam moments before activations. DTensor-v2 merges these
+  # adapters into ordinary weights before each FP8 vLLM refit.
+  activation_checkpointing: true
+  freeze_vision_tower: true
+  freeze_audio_tower: true
+  lora:
+    enabled: true
+    dim: 32
+    alpha: 32
+    # Thinking Machines' all-layer result means attention + MLP + GDN
+    # projections, not the frozen vision tower or lm_head. Qwen3.5 names its
+    # GDN inputs in_proj_qkv/z/a/b, so the trailing wildcard is required.
+    target_modules: ["model.language_model.*proj*"]
+    exclude_modules: []
+    match_all_linear: false
+    dropout: 0.0
+    dropout_position: post
+    lora_A_init: xavier
+    use_triton: true
+
+vllm_runtime:
+  gpu_memory_utilization: 0.35
+  enforce_eager: false
+  max_model_len: 131072
+  # NeMo main currently embeds vLLM 0.20. Its FP8 startup profile rejects the
+  # 65,536-token CUTLASS shape on GB10 (`cutlass_gemm_caller: Invalid status`).
+  # Keep the standalone vLLM 0.24 serving optimum at 65,536; use the highest
+  # already-proven lower ladder point for this integration gate.
+  max_num_batched_tokens: 16384
+  max_num_seqs: 8
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  mamba_cache_mode: align
+  language_model_only: true
+  # The SM121 CUTLASS block-FP8 kernel rejects Qwen3.5's 32x4096 GDN gates
+  # after their output dimension is padded to 64. Keep only these ~6.3M
+  # parameters in BF16; >99.9% of text weights remain on NeMo's FP8 refit path.
+  quantization_ignored_layer_kws:
+    - linear_attn.in_proj_a
+    - linear_attn.in_proj_b

@@ -1,7 +1,7 @@
 """Compile an :class:`ExperimentSpec` into a NeMo base config + dotted overrides.
 
 The compiler owns the experiment-level overrides only. Every key it emits
-already exists in the merged base config (``grpo-qwen3-0.6b-1n8g-sglang.yaml`` ->
+already exists in the merged base config (``grpo_math_1B_sglang.yaml`` ->
 ``grpo_math_1B.yaml``), so NeMo's loader applies them under ``set_struct(True)``
 without an append (``+``) prefix. Grounding for each mapping lives in the
 NeMo RL revision pinned in the lab skill:
@@ -14,12 +14,16 @@ NeMo RL revision pinned in the lab skill:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from .spec import Algorithm, ExperimentSpec
 
 # Base recipe the experiment delta is applied over.
-SGLANG_BASE = "examples/configs/recipes/llm/grpo-qwen3-0.6b-1n8g-sglang.yaml"
+# Shared by the proven c236 rollback and current NeMo main. The former
+# Qwen3-specific recipe was removed by the SGLang rollout refactor in current
+# main, while this base retains the same inheritance point on both revisions.
+SGLANG_BASE = "examples/configs/grpo_math_1B_sglang.yaml"
 
 # Laguna parity for CISPO: (c_low, c_high) = (1, 4) -> NeMo clamp [1-1, 1+4]=[0,5].
 _CISPO_DEFAULT_CLIP = (1.0, 4.0)
@@ -60,6 +64,10 @@ def _hydra_value(value: object) -> str:
         return "true" if value else "false"
     if value is None:
         return "null"
+    if isinstance(value, (list, tuple)):
+        # Compact JSON is valid Hydra list syntax and survives the smoke
+        # launcher's shell boundary without whitespace splitting.
+        return json.dumps(value, separators=(",", ":"))
     return str(value)
 
 
@@ -72,6 +80,7 @@ def compile_spec(spec: ExperimentSpec) -> CompiledExperiment:
     r = spec.rollout
     m = spec.model
     t = spec.topology
+    trainer = spec.trainer
 
     # async / two-Spark disaggregation
     ov.append(("grpo.async_grpo.enabled", ag.enabled))
@@ -113,12 +122,127 @@ def compile_spec(spec: ExperimentSpec) -> CompiledExperiment:
     ov.append(("policy.tokenizer.name", m.train_path))
     ov.append(("policy.max_total_sequence_length", m.max_total_sequence_length))
 
+    # Trainer fit. Qwen3.5-9B full fine-tuning cannot fit a single GB10 once
+    # FP32 master weights, gradients, and Adam moments coexist. NeMo DTensor-v2
+    # merges LoRA into the streamed base tensors at refit, so the rollout still
+    # receives ordinary FP8 weights rather than an adapter-aware serving path.
+    if trainer.activation_checkpointing:
+        ov.append(("policy.dtensor_cfg.activation_checkpointing", True))
+    if trainer.freeze_vision_tower is not None:
+        ov.append(
+            (
+                "++policy.dtensor_cfg.automodel_kwargs.freeze_config.freeze_vision_tower",
+                trainer.freeze_vision_tower,
+            )
+        )
+    if trainer.freeze_audio_tower is not None:
+        ov.append(
+            (
+                "++policy.dtensor_cfg.automodel_kwargs.freeze_config.freeze_audio_tower",
+                trainer.freeze_audio_tower,
+            )
+        )
+    if trainer.lora.enabled:
+        lora = trainer.lora
+        ov.extend(
+            [
+                ("policy.dtensor_cfg.lora_cfg.enabled", True),
+                ("policy.dtensor_cfg.lora_cfg.dim", lora.dim),
+                ("policy.dtensor_cfg.lora_cfg.alpha", lora.alpha),
+                ("policy.dtensor_cfg.lora_cfg.target_modules", lora.target_modules),
+                ("policy.dtensor_cfg.lora_cfg.exclude_modules", lora.exclude_modules),
+                (
+                    "policy.dtensor_cfg.lora_cfg.match_all_linear",
+                    lora.match_all_linear,
+                ),
+                ("policy.dtensor_cfg.lora_cfg.dropout", lora.dropout),
+                (
+                    "policy.dtensor_cfg.lora_cfg.dropout_position",
+                    lora.dropout_position,
+                ),
+                ("policy.dtensor_cfg.lora_cfg.lora_A_init", lora.lora_A_init),
+                ("policy.dtensor_cfg.lora_cfg.use_triton", lora.use_triton),
+            ]
+        )
+
     # generation / topology shape
     ov.append(("policy.generation.backend", spec.precision.rollout_backend))
     ov.append(("policy.generation.vllm_cfg.async_engine", True))
     ov.append(("policy.generation.vllm_cfg.precision", spec.precision.rollout))
     ov.append(("policy.generation.vllm_cfg.kv_cache_dtype", spec.precision.kv_cache_dtype))
-    ov.append(("policy.generation.vllm_cfg.max_model_len", m.max_total_sequence_length))
+    if spec.vllm_runtime.max_model_len is None:
+        ov.append(("policy.generation.vllm_cfg.max_model_len", m.max_total_sequence_length))
+    else:
+        # The smoke launcher owns this key through POLAR_MODEL_MAX_MODEL_LEN.
+        # Use an additive positional override so a serving-only context can be
+        # decoupled from the smaller trainer smoke sequence length.
+        ov.append(
+            (
+                "++policy.generation.vllm_cfg.max_model_len",
+                spec.vllm_runtime.max_model_len,
+            )
+        )
+    # The pinned NeMo base declares vllm_kwargs as an empty structured mapping
+    # and predates enable_prefix_caching in vllm_cfg. These runtime keys
+    # therefore require Hydra's additive `++` form. Keeping them in the
+    # compiled experiment delta makes the serving contract lineage-visible and
+    # routes them as positional overrides after the smoke launcher's defaults.
+    runtime = spec.vllm_runtime
+    # NeMo only forwards free-form engine constructor arguments from
+    # generation.vllm_kwargs. The similarly named keys under vllm_cfg are
+    # accepted by Hydra but are not passed to vLLM, which silently leaves the
+    # engine at its default (observed as a 2,048-token chunk in the live
+    # Qwen3.5 smoke). Emit the authoritative copies here; they are appended
+    # after the smoke launcher's compatibility overrides.
+    if runtime.max_num_seqs is not None:
+        ov.append(
+            (
+                "++policy.generation.vllm_kwargs.max_num_seqs",
+                runtime.max_num_seqs,
+            )
+        )
+    if runtime.max_num_batched_tokens is not None:
+        ov.append(
+            (
+                "++policy.generation.vllm_kwargs.max_num_batched_tokens",
+                runtime.max_num_batched_tokens,
+            )
+        )
+    if runtime.enable_prefix_caching is not None:
+        ov.append(
+            (
+                "++policy.generation.vllm_cfg.enable_prefix_caching",
+                runtime.enable_prefix_caching,
+            )
+        )
+    if runtime.enable_chunked_prefill is not None:
+        ov.append(
+            (
+                "++policy.generation.vllm_kwargs.enable_chunked_prefill",
+                runtime.enable_chunked_prefill,
+            )
+        )
+    if runtime.mamba_cache_mode is not None:
+        ov.append(
+            (
+                "++policy.generation.vllm_kwargs.mamba_cache_mode",
+                runtime.mamba_cache_mode,
+            )
+        )
+    if runtime.language_model_only is not None:
+        ov.append(
+            (
+                "++policy.generation.vllm_kwargs.language_model_only",
+                runtime.language_model_only,
+            )
+        )
+    if runtime.quantization_ignored_layer_kws:
+        ov.append(
+            (
+                "++policy.generation.vllm_cfg.quantization_ignored_layer_kws",
+                runtime.quantization_ignored_layer_kws,
+            )
+        )
     ov.append(("policy.generation.temperature", r.temperature))
     ov.append(("policy.generation.top_p", r.top_p))
     ov.append(("policy.generation.colocated.enabled", t.colocated))
@@ -181,6 +305,18 @@ def _emit_objective(a: Algorithm, ov: list[tuple[str, object]]) -> None:
 def _validate(spec: ExperimentSpec) -> None:
     a = spec.algorithm
     ag = spec.async_grpo
+    lora = spec.trainer.lora
+
+    if lora.enabled:
+        if lora.target_modules and lora.exclude_modules:
+            raise SpecCompileError(
+                "LoRA target_modules and exclude_modules are mutually exclusive."
+            )
+        if lora.match_all_linear and (lora.target_modules or lora.exclude_modules):
+            raise SpecCompileError(
+                "LoRA match_all_linear=true requires empty target_modules and "
+                "exclude_modules."
+            )
 
     # async GRPO excludes DAPO data-side features (run_grpo.py:155-160).
     if ag.enabled and (a.dynamic_sampling or a.reward_shaping):

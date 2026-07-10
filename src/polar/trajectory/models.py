@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -86,6 +86,38 @@ class CompletionSession(BaseModel):
         return self
 
 
+class CompactionEvent(BaseModel):
+    """One explicit context-compaction boundary inside a rollout.
+
+    The raw completion records remain the authoritative pre-compaction trace.
+    This record makes the boundary, generated summary, resumed context, and
+    lineage independently auditable without pretending the rewritten prompt is
+    an append-only continuation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    summary_trace_index: int = Field(ge=0)
+    resume_trace_index: int = Field(ge=0)
+    source_completion_ids: list[str] = Field(min_length=1)
+    summary_completion_id: str
+    resume_completion_id: str
+    context_limit: int = Field(gt=0)
+    trigger_token_count: int = Field(ge=0)
+    threshold_remaining_tokens: int = Field(gt=0)
+    recent_turns_to_keep: int = Field(ge=0)
+    pre_compaction_context_tokens: int = Field(gt=0)
+    summary_tokens: int = Field(gt=0)
+    resumed_context_tokens: int = Field(gt=0)
+    summary_compression_ratio: float = Field(gt=0.0)
+    summary_text: str
+    pre_compaction_token_hash: str
+    summary_token_hash: str
+    resumed_context_token_hash: str
+    policy_version: str | None = None
+
+
 class Trace(BaseModel):
     """One reconstructed completion interaction."""
 
@@ -97,7 +129,12 @@ class Trace(BaseModel):
     tools: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
     response_logprobs: list[float] | None = None
+    sampling_support_token_ids: list[list[int]] | None = None
+    sampling_support_mass: list[float] | None = None
     reward: float | None = None
+    segment_index: int | None = Field(default=None, ge=0)
+    segment_kind: Literal["execution", "summary"] | None = None
+    compaction_event_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("loss_mask")
@@ -120,6 +157,18 @@ class Trace(BaseModel):
             and len(self.response_logprobs) != len(self.response_ids)
         ):
             raise ValueError("response_logprobs length must match response_ids length")
+        if (
+            self.sampling_support_token_ids is not None
+            and len(self.sampling_support_token_ids) != len(self.response_ids)
+        ):
+            raise ValueError(
+                "sampling_support_token_ids length must match response_ids length"
+            )
+        if (
+            self.sampling_support_mass is not None
+            and len(self.sampling_support_mass) != len(self.response_ids)
+        ):
+            raise ValueError("sampling_support_mass length must match response_ids length")
         return self
 
 
@@ -129,6 +178,7 @@ class Trajectory(BaseModel):
     status: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     traces: list[Trace] = Field(default_factory=list)
+    compaction_events: list[CompactionEvent] = Field(default_factory=list)
     error: str | None = None
 
     @field_validator("status")

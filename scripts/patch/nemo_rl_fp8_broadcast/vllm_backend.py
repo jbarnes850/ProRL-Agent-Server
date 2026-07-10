@@ -28,6 +28,8 @@ from nemo_rl.models.policy.utils import (
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.packed_tensor import packed_broadcast_consumer
 
+from nemo_polar_bridge.refit import adapt_qwen35_language_only_weights
+
 try:
     import vllm  # noqa: F401
 except ImportError:
@@ -50,6 +52,18 @@ def fix_gemma3_vision_weight_name(key: str) -> str:
 
 
 class VllmInternalWorkerExtension:
+    def bind_numa(self) -> bool:
+        """Pin this vLLM worker to the CPUs local to its physical GPU."""
+        from nemo_rl.distributed.numa_utils import (
+            bind_to_gpu_numa,
+            resolve_visible_gpu_id,
+        )
+
+        gpu_id = resolve_visible_gpu_id(torch.cuda.current_device())
+        if gpu_id is None:
+            return False
+        return bind_to_gpu_numa(gpu_id)
+
     def init_collective(
         self,
         rank_prefix: int,
@@ -220,6 +234,27 @@ class VllmInternalWorkerExtension:
         """
         from nemo_rl.models.generation.vllm.quantization import fp8
 
+        if os.getenv("NRL_QWEN35_TEXT_REFIT") == "1":
+            weights, rewritten, dropped = adapt_qwen35_language_only_weights(
+                weights,
+                target_module_names=(
+                    name for name, _ in self.model_runner.model.named_modules()
+                ),
+            )
+            print(
+                "[qwen35_text_refit] "
+                f"target={type(self.model_runner.model).__name__} "
+                f"rewritten={rewritten} dropped_vision={dropped} "
+                f"forwarded={len(weights)}",
+                flush=True,
+            )
+            self._qwen35_refit_rewritten = (  # pyrefly: ignore[implicitly-defined-attribute]
+                getattr(self, "_qwen35_refit_rewritten", 0) + rewritten
+            )
+            self._qwen35_refit_dropped = (  # pyrefly: ignore[implicitly-defined-attribute]
+                getattr(self, "_qwen35_refit_dropped", 0) + dropped
+            )
+
         if (
             "Gemma3ForConditionalGeneration"
             in self.model_runner.vllm_config.model_config.architectures
@@ -261,6 +296,9 @@ class VllmInternalWorkerExtension:
         weights = None
 
         try:
+            if os.getenv("NRL_QWEN35_TEXT_REFIT") == "1":
+                self._qwen35_refit_rewritten = 0
+                self._qwen35_refit_dropped = 0
             self.maybe_init_zmq()
             while True:
                 # Blocking receive with timeout (this is the main operation)
@@ -325,6 +363,14 @@ class VllmInternalWorkerExtension:
                 self.zmq_socket.send(IPCProtocol.ACK.value.encode())
 
             # Process weights after loading for FP8 KV cache
+            if (
+                os.getenv("NRL_QWEN35_TEXT_REFIT") == "1"
+                and self._qwen35_refit_rewritten == 0
+            ):
+                raise RuntimeError(
+                    "Qwen3.5 text-only refit completed without rewriting any "
+                    "composite language-model weights"
+                )
             self._maybe_process_fp8_kv_cache()
 
             gc.collect()
@@ -350,12 +396,31 @@ class VllmInternalWorkerExtension:
         load_model_weight_func = self._load_weights
 
         try:
+            if os.getenv("NRL_QWEN35_TEXT_REFIT") == "1":
+                self._qwen35_refit_rewritten = 0
+                self._qwen35_refit_dropped = 0
             packed_broadcast_consumer(
                 iterator=iter(self.state_dict_info.items()),
                 group=self.model_update_group,
                 src=0,
                 post_unpack_func=load_model_weight_func,
             )
+
+            if (
+                os.getenv("NRL_QWEN35_TEXT_REFIT") == "1"
+                and self._qwen35_refit_rewritten == 0
+            ):
+                raise RuntimeError(
+                    "Qwen3.5 text-only refit completed without rewriting any "
+                    "composite language-model weights"
+                )
+            if os.getenv("NRL_QWEN35_TEXT_REFIT") == "1":
+                print(
+                    "[qwen35_text_refit] complete "
+                    f"rewritten={self._qwen35_refit_rewritten} "
+                    f"dropped_vision={self._qwen35_refit_dropped}",
+                    flush=True,
+                )
 
             # Process weights after loading for FP8 KV cache
             self._maybe_process_fp8_kv_cache()

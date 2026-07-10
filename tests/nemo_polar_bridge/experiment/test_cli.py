@@ -29,7 +29,7 @@ def test_cli_launch_registers_lineage_and_emits_plan(tmp_path):
     plan = json.loads((out / "plan.json").read_text())
     assert plan["env"]["NEMO_GRPO_NUM_PROMPTS_PER_STEP"] == "8"
     assert plan["extra_overrides"] == []
-    assert plan["base_config"].endswith("grpo-qwen3-0.6b-1n8g-sglang.yaml")
+    assert plan["base_config"].endswith("grpo_math_1B_sglang.yaml")
     assert "lineage" in plan and len(plan["lineage"]["compiled_digest"]) == 64
 
     launch_sh = (out / "launch.sh").read_text()

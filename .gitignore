@@ -130,3 +130,7 @@ web/dist/
 # throughput numbers are sourced from -- kept locally available (see
 # scripts/smoke/archive_run_evidence.sh) but not committed to git (P5.4).
 runs/
+
+# Local Codex planning and experiment-composition artifacts.
+/session/
+/work/

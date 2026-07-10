@@ -103,6 +103,9 @@ def _audit_train_data(run_dir: Path) -> dict[str, Any]:
     clipped_high = 0
     mask_tokens = 0
     total_tokens = 0
+    sampling_support_positions = 0
+    sampling_support_train_positions = 0
+    sampled_tokens_in_support = 0
     rows = 0
     has_fields = {
         "token_ids": False,
@@ -111,6 +114,7 @@ def _audit_train_data(run_dir: Path) -> dict[str, Any]:
         "prev_logprobs": False,
         "advantages": False,
         "rewards": False,
+        "sampling_support_token_ids": False,
     }
     for path in paths:
         for line in path.read_text().splitlines():
@@ -132,7 +136,17 @@ def _audit_train_data(run_dir: Path) -> dict[str, Any]:
             loss_mask = [int(x) for x in _flatten_one(row.get("token_loss_mask"))]
             gen = [float(x) for x in _flatten_one(row.get("generation_logprobs"))]
             prev = [float(x) for x in _flatten_one(row.get("prev_logprobs"))]
+            sampling_support = _flatten_one(row.get("sampling_support_token_ids"))
             total_tokens += len(token_ids)
+            sampling_support_positions += len(sampling_support)
+            for i, token_id in enumerate(token_ids):
+                if i >= len(loss_mask) or loss_mask[i] != 1 or i >= len(sampling_support):
+                    continue
+                support_ids = sampling_support[i]
+                if not isinstance(support_ids, list) or not support_ids:
+                    continue
+                sampling_support_train_positions += 1
+                sampled_tokens_in_support += int(int(token_id) in {int(x) for x in support_ids})
             limit = min(len(loss_mask), len(gen), len(prev))
             for i in range(limit):
                 if loss_mask[i] != 1:
@@ -155,6 +169,17 @@ def _audit_train_data(run_dir: Path) -> dict[str, Any]:
         "rows": rows,
         "total_tokens": total_tokens,
         "masked_train_tokens": mask_tokens,
+        "sampling_support_positions": sampling_support_positions,
+        "sampling_support_train_positions": sampling_support_train_positions,
+        "sampling_support_train_coverage": (
+            sampling_support_train_positions / mask_tokens if mask_tokens else None
+        ),
+        "sampled_tokens_in_support": sampled_tokens_in_support,
+        "sampled_token_support_fraction": (
+            sampled_tokens_in_support / sampling_support_train_positions
+            if sampling_support_train_positions
+            else None
+        ),
         **{f"has_{key}": value for key, value in has_fields.items()},
         "reward_summary": _float_stats(rewards),
         "advantage_summary": _float_stats(advantages),
@@ -176,13 +201,45 @@ def _read_exit_code(run_dir: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def audit(run_dir: Path) -> dict[str, Any]:
+def audit(
+    run_dir: Path,
+    *,
+    require_learning_signal: bool = False,
+    require_sampling_distribution_replay: bool = False,
+    max_near_zero_group_fraction: float = 0.5,
+) -> dict[str, Any]:
     log_path = run_dir / "logs" / "grpo-nemo-polar.log"
     log_text = _clean(log_path.read_text(errors="ignore")) if log_path.exists() else ""
     config = _safe_load_json(run_dir / "config.json") or {}
     train_data = _audit_train_data(run_dir)
     steps = _extract_steps(log_text)
     run_timing = _safe_load_json(run_dir / "run_timing.json")
+    group_reward_stds = [
+        float(value)
+        for value in re.findall(
+            r"Polar collector adding group[^\n]*reward_std=([0-9.eE+-]+)",
+            log_text,
+        )
+    ]
+    near_zero_groups = sum(value < 1e-5 for value in group_reward_stds)
+    near_zero_group_fraction = (
+        near_zero_groups / len(group_reward_stds) if group_reward_stds else None
+    )
+    generation = config.get("generation") if isinstance(config, dict) else {}
+    top_p = (
+        float(generation.get("top_p", 1.0))
+        if isinstance(generation, dict)
+        else 1.0
+    )
+    sampling_distribution_replay_needed = top_p < 1.0
+    sampling_distribution_replay_valid = (
+        not sampling_distribution_replay_needed
+        or (
+            train_data["has_sampling_support_token_ids"]
+            and train_data["sampling_support_train_coverage"] == 1.0
+            and train_data["sampled_token_support_fraction"] == 1.0
+        )
+    )
     evidence = {
         "fp8_vllm_precision": "'precision': 'fp8'" in log_text or '"precision": "fp8"' in log_text,
         "fp8_kv_cache": "'kv_cache_dtype': 'fp8'" in log_text or '"kv_cache_dtype": "fp8"' in log_text,
@@ -199,12 +256,18 @@ def audit(run_dir: Path) -> dict[str, Any]:
             (train_data["advantage_summary"].get("max") or 0) != 0
             or (train_data["advantage_summary"].get("min") or 0) != 0
         ),
+        "reward_variance_gate": bool(
+            group_reward_stds
+            and near_zero_group_fraction is not None
+            and near_zero_group_fraction <= max_near_zero_group_fraction
+        ),
         "reward_grouping": "reward_std=" in log_text,
         "replay_add": "ReplayBuffer.add: Adding trajectory" in log_text,
         "replay_sample": "Sampled " in log_text and "trajectory groups from buffer" in log_text,
         "policy_update": "▶ Training policy" in log_text,
         "weight_sync": "Synchronizing policy weights to trajectory collector" in log_text,
         "async_grpo_complete": "Async GRPO training complete" in log_text,
+        "sampling_distribution_replay": sampling_distribution_replay_valid,
     }
     docker_exit_code = _read_exit_code(run_dir)
     required_evidence = [
@@ -217,10 +280,13 @@ def audit(run_dir: Path) -> dict[str, Any]:
         "weight_sync",
         "async_grpo_complete",
     ]
-    generation = config.get("generation") if isinstance(config, dict) else {}
     vllm_runtime = generation.get("vllm_runtime") if isinstance(generation, dict) else {}
     if isinstance(vllm_runtime, dict) and str(vllm_runtime.get("precision", "")).casefold() == "fp8":
         required_evidence.append("fp8_vllm_precision")
+    if require_learning_signal:
+        required_evidence.extend(["reward_variance_gate", "nonzero_advantages"])
+    if require_sampling_distribution_replay:
+        required_evidence.append("sampling_distribution_replay")
     status = "passed" if docker_exit_code == 0 and all(
         bool(evidence[key]) for key in required_evidence
     ) else "failed"
@@ -231,6 +297,21 @@ def audit(run_dir: Path) -> dict[str, Any]:
         "config": config,
         "evidence": evidence,
         "required_evidence": required_evidence,
+        "validation_mode": "learning" if require_learning_signal else "infrastructure",
+        "reward_variance": {
+            "group_count": len(group_reward_stds),
+            "near_zero_group_count": near_zero_groups,
+            "near_zero_group_fraction": near_zero_group_fraction,
+            "max_near_zero_group_fraction": max_near_zero_group_fraction,
+        },
+        "sampling_distribution": {
+            "top_p": top_p,
+            "rollout_support_replay_needed": sampling_distribution_replay_needed,
+            "contract": (
+                "sampling_support_token_ids must be token-aligned, cover every "
+                "trainable token, and contain the sampled token"
+            ),
+        },
         "steps": steps,
         "train_data_audit": train_data,
     }
@@ -244,8 +325,16 @@ def audit(run_dir: Path) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
+    parser.add_argument("--require-learning-signal", action="store_true")
+    parser.add_argument("--require-sampling-distribution-replay", action="store_true")
+    parser.add_argument("--max-near-zero-group-fraction", type=float, default=0.5)
     args = parser.parse_args()
-    summary = audit(args.run_dir)
+    summary = audit(
+        args.run_dir,
+        require_learning_signal=args.require_learning_signal,
+        require_sampling_distribution_replay=args.require_sampling_distribution_replay,
+        max_near_zero_group_fraction=args.max_near_zero_group_fraction,
+    )
     run_dir = args.run_dir
     (run_dir / "validation_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n"
@@ -276,6 +365,8 @@ def main() -> None:
             + "\n"
         )
     print(json.dumps({"status": summary["status"], "run_dir": str(run_dir)}, sort_keys=True))
+    if summary["status"] != "passed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
